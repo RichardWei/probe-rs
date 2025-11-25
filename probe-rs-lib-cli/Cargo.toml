@@ -1,0 +1,8 @@
+[package]
+name = "probe-rs-lib-cli"
+version = "0.30.0"
+edition = "2024"
+description = "CLI validator that calls probe-rs-lib dynamic library via FFI"
+
+[dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_LibraryLoader"] }

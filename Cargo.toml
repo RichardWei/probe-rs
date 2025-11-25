@@ -21,6 +21,8 @@ members = [
     "probe-rs-tools",
     "probe-rs-mi",
     "probe-rs-debug",
+    "probe-rs-lib",
+    "probe-rs-lib-cli",
 ]
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
