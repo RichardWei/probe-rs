@@ -28,6 +28,22 @@
 - 断点：`pr_available_breakpoint_units`、`pr_set_hw_breakpoint`、`pr_clear_hw_breakpoint`、`pr_clear_all_hw_breakpoints`
 - 烧录：`pr_flash_elf`、`pr_flash_hex`、`pr_flash_bin`、`pr_flash_auto`
 
+### 芯片枚举与探测（Chip Listing & Detection）
+
+- 枚举 API（基于整数索引，适合 C 调用）：
+  - `pr_chip_manufacturer_count()`：返回支持的制造商数量
+  - `pr_chip_manufacturer_name(index, buf, buf_len)`：按索引返回制造商名称（UTF‑8）。当 `buf==NULL` 或 `buf_len==0` 时返回所需长度（包含 NUL）
+  - `pr_chip_model_count(manu_index)`：返回该制造商下的芯片型号数量
+  - `pr_chip_model_name(manu_index, chip_index, buf, buf_len)`：返回对应芯片型号名称（UTF‑8）
+  - `pr_chip_model_specs(manu_index, chip_index, buf, buf_len)`：返回 JSON 格式的详细规格信息（架构、核心、内存区域、闪存算法等）
+  - `pr_chip_specs_by_name(name, buf, buf_len)`：按芯片名返回 JSON 规格
+- 探测 API：
+  - `pr_probe_detect_target_info(probe_index, &out_manu_index, &out_chip_index, name_buf, name_buf_len)`：尝试通过已设置的编程器类型附着并识别目标芯片；成功后返回芯片名，并尽可能给出制造商与型号索引；失败时返回 `<=0` 并可用 `pr_last_error()` 读取错误
+- 设计说明：
+  - 制造商信息来源于 JEP106（JEDEC）编码；`Registry::from_builtin_families()` 提供内置目标数据库
+  - 所有字符串均为 UTF‑8；C 调用可按需两段式分配（先请求长度、再写入）
+  - 错误统一通过 `pr_last_error()` 返回英文提示，便于日志与国际化
+
 ### 进度回调（Progress Callback）
 
 - 用于在擦除/烧录/校验阶段上报英文状态、百分比与 ETA（毫秒）
@@ -129,6 +145,24 @@ cargo run -p probe-rs-lib-cli -- --op flash --chip stm32f407zet6 --protocol swd 
 cargo run -p probe-rs-lib-cli -- --op flash --chip <chip> --file firmware.bin --base 0x08000000 --programmer-type stlink
 ```
 
+枚举支持的制造商与芯片型号：
+
+```
+cargo run -p probe-rs-lib-cli -- --op chips --programmer-type cmsis-dap
+```
+
+识别连接的目标芯片：
+
+```
+cargo run -p probe-rs-lib-cli -- --op detect --programmer-type stlink
+```
+
+按名称查询芯片详细规格（JSON）：
+
+```
+cargo run -p probe-rs-lib-cli -- --op spec --chip nrf51822_Xxaa --programmer-type cmsis-dap
+```
+
 ## 测试
 
 - 包含无硬件的单元测试（错误处理与版本号）
@@ -144,6 +178,7 @@ cargo run -p probe-rs-lib-cli -- --op flash --chip <chip> --file firmware.bin --
 
 - 0.30.0
   - 新增：自动文件格式检测 `pr_flash_auto`
+  - 新增：芯片枚举与探测 API（制造商/型号列表、规格查询、目标识别）
   - 新增：编程器类型 API（设置/校验/获取）
   - 新增：进度回调 API（状态/百分比/ETA，英文）
   - CLI：移除 `--format`，严格要求 `--programmer-type`，日志统一英文

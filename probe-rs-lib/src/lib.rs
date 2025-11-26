@@ -1,3 +1,4 @@
+use probe_rs::config::Registry;
 use probe_rs::flashing::{
     self, BinOptions, DownloadOptions, FlashProgress, Format, FormatKind, ProgressEvent,
     ProgressOperation,
@@ -8,7 +9,8 @@ use probe_rs::probe::{
     ftdi::FtdiProbeFactory, glasgow::GlasgowFactory, jlink::JLinkFactory,
     sifliuart::SifliUartFactory, stlink::StLinkFactory, wlink::WchLinkFactory,
 };
-use probe_rs::{CoreStatus, MemoryInterface, Session, SessionConfig};
+use probe_rs::{CoreStatus, MemoryInterface, Permissions, Session, SessionConfig};
+use probe_rs_target::MemoryRegion;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
 use std::sync::Arc;
@@ -33,6 +35,348 @@ enum ProgrammerType {
     Ch347UsbJtag,
 }
 static PROGRAMMER_TYPE: OnceLock<Mutex<Option<ProgrammerType>>> = OnceLock::new();
+static REGISTRY: OnceLock<Registry> = OnceLock::new();
+
+#[derive(Clone)]
+struct ManuEntry {
+    name: String,
+    chips: Vec<String>,
+}
+
+struct ChipDb {
+    manufacturers: Vec<ManuEntry>,
+    name_to_index: HashMap<String, (u32, u32)>,
+}
+
+static CHIP_DB: OnceLock<ChipDb> = OnceLock::new();
+
+fn registry() -> &'static Registry {
+    REGISTRY.get_or_init(|| Registry::from_builtin_families())
+}
+
+fn build_chip_db() -> ChipDb {
+    let reg = registry();
+    let mut manu_map: HashMap<(u8, u8), usize> = HashMap::new();
+    let mut manufacturers: Vec<ManuEntry> = Vec::new();
+
+    for family in reg.families() {
+        let (cc, id, mname) = match family.manufacturer {
+            Some(code) => {
+                let name = code.get().unwrap_or("<unknown>").to_string();
+                (code.cc, code.id, name)
+            }
+            None => (0, 0, "Generic".to_string()),
+        };
+        let idx = *manu_map.entry((cc, id)).or_insert_with(|| {
+            let i = manufacturers.len();
+            manufacturers.push(ManuEntry {
+                name: mname.clone(),
+                chips: Vec::new(),
+            });
+            i
+        });
+        let targets = reg
+            .get_targets_by_family_name(&family.name)
+            .unwrap_or_default();
+        manufacturers[idx].chips.extend(targets);
+    }
+
+    for m in manufacturers.iter_mut() {
+        m.chips.sort();
+        m.chips.dedup();
+    }
+
+    let mut name_to_index: HashMap<String, (u32, u32)> = HashMap::new();
+    for (mi, m) in manufacturers.iter().enumerate() {
+        for (ci, c) in m.chips.iter().enumerate() {
+            name_to_index.insert(c.clone(), (mi as u32, ci as u32));
+        }
+    }
+
+    ChipDb {
+        manufacturers,
+        name_to_index,
+    }
+}
+
+fn chip_db() -> &'static ChipDb {
+    CHIP_DB.get_or_init(build_chip_db)
+}
+
+fn make_target_spec_string(manufacturer: &str, chip_name: &str) -> Result<String, String> {
+    let target = match registry().get_target_by_name(chip_name) {
+        Ok(t) => t,
+        Err(e) => return Err(format!("get_target_by_name error: {}", e)),
+    };
+
+    let arch = format!("{:?}", target.architecture());
+    let cores = target
+        .cores
+        .iter()
+        .map(|c| format!("{}:{:?}", c.name, c.core_type))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut ram_total: u64 = 0;
+    let mut nvm_total: u64 = 0;
+    let mut regions: Vec<String> = Vec::new();
+    for region in target.memory_map.iter() {
+        match region {
+            MemoryRegion::Ram(r) => {
+                let size = r.range.end.saturating_sub(r.range.start);
+                ram_total = ram_total.saturating_add(size);
+                regions.push(format!(
+                    "Ram({:#010x}-{:#010x})",
+                    r.range.start, r.range.end
+                ));
+            }
+            MemoryRegion::Nvm(n) => {
+                let size = n.range.end.saturating_sub(n.range.start);
+                nvm_total = nvm_total.saturating_add(size);
+                regions.push(format!(
+                    "Nvm({:#010x}-{:#010x})",
+                    n.range.start, n.range.end
+                ));
+            }
+            MemoryRegion::Generic(g) => {
+                regions.push(format!(
+                    "Generic({:#010x}-{:#010x})",
+                    g.range.start, g.range.end
+                ));
+            }
+        }
+    }
+
+    let flash_algos = target
+        .flash_algorithms
+        .iter()
+        .map(|a| a.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let default_fmt = target.default_format.clone().unwrap_or_default();
+
+    let s = format!(
+        "{{\"manufacturer\":\"{}\",\"chip\":\"{}\",\"architecture\":\"{}\",\"cores\":\"{}\",\"ram_bytes\":{},\"nvm_bytes\":{},\"regions\":\"{}\",\"flash_algorithms\":\"{}\",\"default_format\":\"{}\"}}",
+        manufacturer,
+        chip_name,
+        arch,
+        cores,
+        ram_total,
+        nvm_total,
+        regions.join(";"),
+        flash_algos,
+        default_fmt
+    );
+    Ok(s)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_chip_manufacturer_count() -> u32 {
+    chip_db().manufacturers.len() as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_chip_manufacturer_name(index: u32, buf: *mut c_char, buf_len: usize) -> usize {
+    let db = chip_db();
+    let Some(m) = db.manufacturers.get(index as usize) else {
+        set_error("manufacturer index out of range".to_string());
+        return 0;
+    };
+    let bytes = m.name.as_bytes();
+    let need = bytes.len().saturating_add(1);
+    if buf.is_null() || buf_len == 0 {
+        return need;
+    }
+    let copy = need.min(buf_len);
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(buf as *mut u8, copy);
+        let n = copy.saturating_sub(1);
+        slice[..n].copy_from_slice(&bytes[..n]);
+        slice[n] = 0;
+    }
+    need
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_chip_model_count(manufacturer_index: u32) -> u32 {
+    let db = chip_db();
+    let Some(m) = db.manufacturers.get(manufacturer_index as usize) else {
+        set_error("manufacturer index out of range".to_string());
+        return 0;
+    };
+    m.chips.len() as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_chip_model_name(
+    manufacturer_index: u32,
+    chip_index: u32,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> usize {
+    let db = chip_db();
+    let Some(m) = db.manufacturers.get(manufacturer_index as usize) else {
+        set_error("manufacturer index out of range".to_string());
+        return 0;
+    };
+    let Some(name) = m.chips.get(chip_index as usize) else {
+        set_error("chip index out of range".to_string());
+        return 0;
+    };
+    let bytes = name.as_bytes();
+    let need = bytes.len().saturating_add(1);
+    if buf.is_null() || buf_len == 0 {
+        return need;
+    }
+    let copy = need.min(buf_len);
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(buf as *mut u8, copy);
+        let n = copy.saturating_sub(1);
+        slice[..n].copy_from_slice(&bytes[..n]);
+        slice[n] = 0;
+    }
+    need
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_chip_model_specs(
+    manufacturer_index: u32,
+    chip_index: u32,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> usize {
+    let db = chip_db();
+    let Some(m) = db.manufacturers.get(manufacturer_index as usize) else {
+        set_error("manufacturer index out of range".to_string());
+        return 0;
+    };
+    let Some(name) = m.chips.get(chip_index as usize) else {
+        set_error("chip index out of range".to_string());
+        return 0;
+    };
+    let spec = match make_target_spec_string(&m.name, name) {
+        Ok(s) => s,
+        Err(e) => {
+            set_error(e);
+            return 0;
+        }
+    };
+    let bytes = spec.as_bytes();
+    let need = bytes.len().saturating_add(1);
+    if buf.is_null() || buf_len == 0 {
+        return need;
+    }
+    let copy = need.min(buf_len);
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(buf as *mut u8, copy);
+        let n = copy.saturating_sub(1);
+        slice[..n].copy_from_slice(&bytes[..n]);
+        slice[n] = 0;
+    }
+    need
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_chip_specs_by_name(
+    name: *const c_char,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> usize {
+    let Ok(chip_name) = cstr_to_string(name) else {
+        set_error("invalid chip name".to_string());
+        return 0;
+    };
+    let (manu_idx, _) = match chip_db().name_to_index.get(&chip_name) {
+        Some(ix) => *ix,
+        None => (u32::MAX, u32::MAX),
+    };
+    let manufacturer = if manu_idx != u32::MAX {
+        chip_db()
+            .manufacturers
+            .get(manu_idx as usize)
+            .map(|m| m.name.clone())
+    } else {
+        None
+    };
+    let mname = manufacturer.unwrap_or_else(|| "<unknown>".to_string());
+    let spec = match make_target_spec_string(&mname, &chip_name) {
+        Ok(s) => s,
+        Err(e) => {
+            set_error(e);
+            return 0;
+        }
+    };
+    let bytes = spec.as_bytes();
+    let need = bytes.len().saturating_add(1);
+    if buf.is_null() || buf_len == 0 {
+        return need;
+    }
+    let copy = need.min(buf_len);
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(buf as *mut u8, copy);
+        let n = copy.saturating_sub(1);
+        slice[..n].copy_from_slice(&bytes[..n]);
+        slice[n] = 0;
+    }
+    need
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_probe_detect_target_info(
+    index: u32,
+    out_manufacturer_index: *mut u32,
+    out_chip_index: *mut u32,
+    name_buf: *mut c_char,
+    name_buf_len: usize,
+) -> i32 {
+    let lister = Lister::new();
+    let probes = lister.list_all();
+    let Some(info) = probes.get(index as usize) else {
+        set_error("probe index out of range".to_string());
+        return -1;
+    };
+
+    let probe = match info.open() {
+        Ok(p) => p,
+        Err(e) => {
+            set_error(format!("open probe error: {}", e));
+            return -1;
+        }
+    };
+
+    let session = match probe.attach_with_registry((), Permissions::default(), registry()) {
+        Ok(s) => s,
+        Err(e) => {
+            set_error(format!("attach_with_registry error: {}", e));
+            return 0;
+        }
+    };
+    let tname = session.target().name.clone();
+    let (mi, ci) = match chip_db().name_to_index.get(&tname) {
+        Some(&(mi, ci)) => (mi, ci),
+        None => (u32::MAX, u32::MAX),
+    };
+    unsafe {
+        if !out_manufacturer_index.is_null() {
+            *out_manufacturer_index = mi;
+        }
+        if !out_chip_index.is_null() {
+            *out_chip_index = ci;
+        }
+    }
+    let bytes = tname.as_bytes();
+    let need = bytes.len().saturating_add(1);
+    if !name_buf.is_null() && name_buf_len > 0 {
+        let copy = need.min(name_buf_len);
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(name_buf as *mut u8, copy);
+            let n = copy.saturating_sub(1);
+            slice[..n].copy_from_slice(&bytes[..n]);
+            slice[n] = 0;
+        }
+    }
+    1
+}
 
 fn set_error(msg: String) {
     let lock = LAST_ERROR.get_or_init(|| Mutex::new(String::new()));
@@ -1507,19 +1851,19 @@ mod tests {
 
     #[test]
     fn version_roundtrip() {
-        let need = unsafe { pr_version(std::ptr::null_mut(), 0) };
+        let need = pr_version(std::ptr::null_mut(), 0);
         assert!(need > 0);
         let mut buf = vec![0u8; need];
-        let wrote = unsafe { pr_version(buf.as_mut_ptr() as *mut i8, buf.len()) };
+        let wrote = pr_version(buf.as_mut_ptr() as *mut i8, buf.len());
         assert_eq!(wrote, need);
     }
 
     #[test]
     fn invalid_chip_sets_error() {
         let chip = CString::new("not_a_real_chip").unwrap();
-        let handle = unsafe { pr_session_open_auto(chip.as_ptr(), 0, 0) };
+        let handle = pr_session_open_auto(chip.as_ptr(), 0, 0);
         assert_eq!(handle, 0);
-        let need = unsafe { pr_last_error(std::ptr::null_mut(), 0) };
+        let need = pr_last_error(std::ptr::null_mut(), 0);
         assert!(need > 0);
     }
 
@@ -1559,6 +1903,45 @@ mod tests {
         assert!(ok_elf.is_ok());
         let ok_hex = detect_format_from_path("image.hex", None, 0);
         assert!(ok_hex.is_ok());
+    }
+
+    #[test]
+    fn chip_manufacturer_count_is_nonzero() {
+        let n = pr_chip_manufacturer_count();
+        assert!(n > 0);
+    }
+
+    #[test]
+    fn chip_specs_by_name_returns_string() {
+        let name = CString::new("nrf51822_Xxaa").unwrap();
+        let need = pr_chip_specs_by_name(name.as_ptr(), std::ptr::null_mut(), 0);
+        assert!(need > 0);
+        let mut buf = vec![0u8; need];
+        let wrote = pr_chip_specs_by_name(name.as_ptr(), buf.as_mut_ptr() as *mut i8, buf.len());
+        assert_eq!(wrote, need);
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("\"chip\":"));
+    }
+
+    #[test]
+    fn chip_model_listing_has_entries() {
+        let m = pr_chip_manufacturer_count();
+        assert!(m > 0);
+        for mi in 0..m.min(32) {
+            // limit iterations
+            let c = pr_chip_model_count(mi);
+            if c > 0 {
+                let need = pr_chip_model_name(mi, 0, std::ptr::null_mut(), 0);
+                assert!(need > 0);
+                let mut buf = vec![0u8; need];
+                let wrote = pr_chip_model_name(mi, 0, buf.as_mut_ptr() as *mut i8, buf.len());
+                assert_eq!(wrote, need);
+                let cname = String::from_utf8_lossy(&buf);
+                assert!(cname.trim_end_matches('\0').len() > 0);
+                return;
+            }
+        }
+        panic!("no manufacturer with models found");
     }
 }
 // removed string-based programmer type setters/getters; use enum-based APIs and conversion helpers

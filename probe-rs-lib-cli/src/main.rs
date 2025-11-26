@@ -50,6 +50,14 @@ struct Ffi {
     pr_set_programmer_type_code: unsafe extern "C" fn(i32) -> i32,
     pr_programmer_type_is_supported_code: unsafe extern "C" fn(i32) -> i32,
     pr_programmer_type_from_string: unsafe extern "C" fn(*const c_char, *mut i32) -> i32,
+    pr_chip_manufacturer_count: unsafe extern "C" fn() -> u32,
+    pr_chip_manufacturer_name: unsafe extern "C" fn(u32, *mut c_char, usize) -> usize,
+    pr_chip_model_count: unsafe extern "C" fn(u32) -> u32,
+    pr_chip_model_name: unsafe extern "C" fn(u32, u32, *mut c_char, usize) -> usize,
+    pr_chip_model_specs: unsafe extern "C" fn(u32, u32, *mut c_char, usize) -> usize,
+    pr_chip_specs_by_name: unsafe extern "C" fn(*const c_char, *mut c_char, usize) -> usize,
+    pr_probe_detect_target_info:
+        unsafe extern "C" fn(u32, *mut u32, *mut u32, *mut c_char, usize) -> i32,
 }
 
 fn load_ffi(dll_path: &str) -> Ffi {
@@ -86,6 +94,13 @@ fn load_ffi(dll_path: &str) -> Ffi {
             pr_programmer_type_from_string: std::mem::transmute(load(
                 "pr_programmer_type_from_string",
             )),
+            pr_chip_manufacturer_count: std::mem::transmute(load("pr_chip_manufacturer_count")),
+            pr_chip_manufacturer_name: std::mem::transmute(load("pr_chip_manufacturer_name")),
+            pr_chip_model_count: std::mem::transmute(load("pr_chip_model_count")),
+            pr_chip_model_name: std::mem::transmute(load("pr_chip_model_name")),
+            pr_chip_model_specs: std::mem::transmute(load("pr_chip_model_specs")),
+            pr_chip_specs_by_name: std::mem::transmute(load("pr_chip_specs_by_name")),
+            pr_probe_detect_target_info: std::mem::transmute(load("pr_probe_detect_target_info")),
         }
     }
 }
@@ -176,7 +191,7 @@ fn parse_args_from<I: Iterator<Item = String>>(
             "--no-chip-erase" => chip_erase = false,
             "--help" => {
                 println!(
-                    "Usage: --chip <name> --programmer-type <type> [--probe VID:PID[:SERIAL]] [--file <path>] [--protocol swd|jtag] [--speed KHZ] [--op list|check|flash] [--base 0xADDR] [--dll <path>] [--verify|--no-verify] [--preverify|--no-preverify] [--chip-erase|--no-chip-erase]\nSupported programmer types: cmsis-dap, stlink, jlink, ftdi, esp-usb-jtag, wch-link, sifli-uart, glasgow, ch347-usb-jtag"
+                    "Usage: --chip <name> --programmer-type <type> [--probe VID:PID[:SERIAL]] [--file <path>] [--protocol swd|jtag] [--speed KHZ] [--op list|check|flash|chips|detect|spec] [--base 0xADDR] [--dll <path>] [--verify|--no-verify] [--preverify|--no-preverify] [--chip-erase|--no-chip-erase]\nSupported programmer types: cmsis-dap, stlink, jlink, ftdi, esp-usb-jtag, wch-link, sifli-uart, glasgow, ch347-usb-jtag\nExtra ops:\n  chips  - list supported manufacturers and chip models\n  detect - identify connected target chip via probe\n  spec   - print detailed spec of --chip"
                 );
                 std::process::exit(0);
             }
@@ -415,6 +430,114 @@ fn main() {
             }
             println!("Flash complete");
         },
+        "chips" => unsafe {
+            let m = (ffi.pr_chip_manufacturer_count)();
+            println!("{} manufacturers", m);
+            for mi in 0..m {
+                let need = (ffi.pr_chip_manufacturer_name)(mi, std::ptr::null_mut(), 0);
+                let mut mname = vec![0u8; need.max(1)];
+                if need > 0 {
+                    (ffi.pr_chip_manufacturer_name)(
+                        mi,
+                        mname.as_mut_ptr() as *mut c_char,
+                        mname.len(),
+                    );
+                }
+                let mname_str = String::from_utf8_lossy(&mname)
+                    .trim_end_matches('\0')
+                    .to_string();
+                let c = (ffi.pr_chip_model_count)(mi);
+                println!("[{}] {} ({} models)", mi, mname_str, c);
+                for ci in 0..c.min(50) {
+                    // limit to 50 to keep output reasonable
+                    let need_c = (ffi.pr_chip_model_name)(mi, ci, std::ptr::null_mut(), 0);
+                    if need_c == 0 {
+                        continue;
+                    }
+                    let mut cname = vec![0u8; need_c];
+                    (ffi.pr_chip_model_name)(
+                        mi,
+                        ci,
+                        cname.as_mut_ptr() as *mut c_char,
+                        cname.len(),
+                    );
+                    println!(
+                        "    - {}",
+                        String::from_utf8_lossy(&cname).trim_end_matches('\0')
+                    );
+                }
+            }
+        },
+        "detect" => unsafe {
+            let n = (ffi.pr_probe_count)();
+            if n == 0 {
+                eprintln!("no probes found");
+                std::process::exit(2);
+            }
+            for i in 0..n {
+                let mut mi: u32 = u32::MAX;
+                let mut ci: u32 = u32::MAX;
+                let mut name = vec![0u8; 128];
+                let rc = (ffi.pr_probe_detect_target_info)(
+                    i,
+                    &mut mi as *mut u32,
+                    &mut ci as *mut u32,
+                    name.as_mut_ptr() as *mut c_char,
+                    name.len(),
+                );
+                if rc <= 0 {
+                    print_last_error(&ffi);
+                    println!("[{}] detection failed", i);
+                    continue;
+                }
+                println!(
+                    "[{}] detected {} (manu={}, model={})",
+                    i,
+                    String::from_utf8_lossy(&name).trim_end_matches('\0'),
+                    mi,
+                    ci
+                );
+                // Also dump brief specs
+                if mi != u32::MAX && ci != u32::MAX {
+                    let need = (ffi.pr_chip_model_specs)(mi, ci, std::ptr::null_mut(), 0);
+                    if need > 0 {
+                        let mut buf = vec![0u8; need];
+                        (ffi.pr_chip_model_specs)(
+                            mi,
+                            ci,
+                            buf.as_mut_ptr() as *mut c_char,
+                            buf.len(),
+                        );
+                        println!(
+                            "    specs: {}",
+                            String::from_utf8_lossy(&buf).trim_end_matches('\0')
+                        );
+                    }
+                }
+            }
+        },
+        "spec" => unsafe {
+            let chip = match chip {
+                Some(c) => c,
+                None => {
+                    eprintln!("--chip required for spec");
+                    std::process::exit(1);
+                }
+            };
+            let c_chip = CString::new(chip).unwrap();
+            let need = (ffi.pr_chip_specs_by_name)(c_chip.as_ptr(), std::ptr::null_mut(), 0);
+            if need == 0 {
+                print_last_error(&ffi);
+                std::process::exit(3);
+            }
+            let mut buf = vec![0u8; need];
+            (ffi.pr_chip_specs_by_name)(
+                c_chip.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len(),
+            );
+            println!("{}", String::from_utf8_lossy(&buf).trim_end_matches('\0'));
+        },
         _ => {
             eprintln!("unknown --op");
             std::process::exit(1);
@@ -519,5 +642,21 @@ mod tests {
         let args_dec = make_args(&["--base", "4096"]);
         let (_, _, _, _, _, _, base_dec, _, _, _, _, _) = parse_args_from(args_dec);
         assert_eq!(base_dec, Some(4096));
+    }
+
+    #[test]
+    fn parse_ops_chips_detect_spec() {
+        let a_chips = make_args(&["--op", "chips"]);
+        let (_, _, _, _, _, op_chips, _, _, _, _, _, _) = parse_args_from(a_chips);
+        assert_eq!(op_chips, Some("chips".to_string()));
+
+        let a_detect = make_args(&["--op", "detect"]);
+        let (_, _, _, _, _, op_detect, _, _, _, _, _, _) = parse_args_from(a_detect);
+        assert_eq!(op_detect, Some("detect".to_string()));
+
+        let a_spec = make_args(&["--op", "spec", "--chip", "nrf51822_Xxaa"]);
+        let (chip, _, _, _, _, op_spec, _, _, _, _, _, _) = parse_args_from(a_spec);
+        assert_eq!(op_spec, Some("spec".to_string()));
+        assert_eq!(chip, Some("nrf51822_Xxaa".to_string()));
     }
 }

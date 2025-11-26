@@ -112,8 +112,7 @@ int32_t pr_set_hw_breakpoint(uint64_t session, uint32_t core_index, uint64_t add
 int32_t pr_clear_hw_breakpoint(uint64_t session, uint32_t core_index, uint64_t address);
 int32_t pr_clear_all_hw_breakpoints(uint64_t session);
 
-/*
- Flashing operations (firmware programming)
+/* Flashing operations (firmware programming)
 */
 /* Progress callback API */
 /*
@@ -167,6 +166,42 @@ int32_t pr_flash_hex(const char* chip, const char* path, int32_t verify, int32_t
 int32_t pr_flash_bin(const char* chip, const char* path, uint64_t base_address, uint32_t skip, int32_t verify, int32_t preverify, int32_t chip_erase, uint32_t speed_khz, int32_t protocol_code);
 /* Auto-detect format (by file extension): .elf/.axf => ELF, .hex/.ihex => HEX, .bin => BIN (requires base_address) */
 int32_t pr_flash_auto(const char* chip, const char* path, uint64_t base_address, uint32_t skip, int32_t verify, int32_t preverify, int32_t chip_erase, uint32_t speed_khz, int32_t protocol_code);
+
+/* Chip database and detection */
+/*
+   Manufacturer & Chip Listing
+   - All names are exposed as UTF-8 C strings.
+   - Use integer indexes; do not rely on string matching in C code.
+   Functions:
+     - pr_chip_manufacturer_count(): Return the number of manufacturers.
+     - pr_chip_manufacturer_name(index, buf, buf_len): Get manufacturer name by index.
+       If buf==NULL or buf_len==0, returns required size (including NUL).
+     - pr_chip_model_count(manu_index): Return number of chip models for the manufacturer.
+     - pr_chip_model_name(manu_index, chip_index, buf, buf_len): Get chip model name.
+       Same size semantics as above.
+     - pr_chip_model_specs(manu_index, chip_index, buf, buf_len): Return a JSON string
+       of spec details (architecture, cores, memory regions, algorithms).
+     - pr_chip_specs_by_name(name, buf, buf_len): Return a JSON spec string for a given name.
+   Error handling: On invalid index or name, functions return 0 and set pr_last_error().
+*/
+uint32_t pr_chip_manufacturer_count(void);
+size_t   pr_chip_manufacturer_name(uint32_t index, char* buf, size_t buf_len);
+uint32_t pr_chip_model_count(uint32_t manu_index);
+size_t   pr_chip_model_name(uint32_t manu_index, uint32_t chip_index, char* buf, size_t buf_len);
+size_t   pr_chip_model_specs(uint32_t manu_index, uint32_t chip_index, char* buf, size_t buf_len);
+size_t   pr_chip_specs_by_name(const char* name, char* buf, size_t buf_len);
+
+/*
+   Probe-based target detection
+   - Tries to attach using the configured programmer type.
+   - On success, fills manufacturer/chip indexes if known, and writes target name.
+   Returns: >0 success; 0/negative on failure; use pr_last_error() for details.
+*/
+int32_t  pr_probe_detect_target_info(uint32_t probe_index,
+                                    uint32_t* out_manufacturer_index,
+                                    uint32_t* out_chip_index,
+                                    char* name_buf,
+                                    size_t name_buf_len);
 
 #ifdef __cplusplus
 }

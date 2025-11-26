@@ -10,3 +10,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 probe-rs.workspace = true
+probe-rs-target.workspace = true
