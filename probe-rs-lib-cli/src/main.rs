@@ -47,6 +47,7 @@ struct Ffi {
         u32,
         i32,
     ) -> i32,
+    pr_chip_erase: unsafe extern "C" fn(*const c_char, u32, i32) -> i32,
     pr_set_programmer_type_code: unsafe extern "C" fn(i32) -> i32,
     pr_programmer_type_is_supported_code: unsafe extern "C" fn(i32) -> i32,
     pr_programmer_type_from_string: unsafe extern "C" fn(*const c_char, *mut i32) -> i32,
@@ -56,8 +57,6 @@ struct Ffi {
     pr_chip_model_name: unsafe extern "C" fn(u32, u32, *mut c_char, usize) -> usize,
     pr_chip_model_specs: unsafe extern "C" fn(u32, u32, *mut c_char, usize) -> usize,
     pr_chip_specs_by_name: unsafe extern "C" fn(*const c_char, *mut c_char, usize) -> usize,
-    pr_probe_detect_target_info:
-        unsafe extern "C" fn(u32, *mut u32, *mut u32, *mut c_char, usize) -> i32,
 }
 
 fn load_ffi(dll_path: &str) -> Ffi {
@@ -87,6 +86,7 @@ fn load_ffi(dll_path: &str) -> Ffi {
             pr_set_progress_callback: std::mem::transmute(load("pr_set_progress_callback")),
             pr_clear_progress_callback: std::mem::transmute(load("pr_clear_progress_callback")),
             pr_flash_auto: std::mem::transmute(load("pr_flash_auto")),
+            pr_chip_erase: std::mem::transmute(load("pr_chip_erase")),
             pr_set_programmer_type_code: std::mem::transmute(load("pr_set_programmer_type_code")),
             pr_programmer_type_is_supported_code: std::mem::transmute(load(
                 "pr_programmer_type_is_supported_code",
@@ -100,7 +100,6 @@ fn load_ffi(dll_path: &str) -> Ffi {
             pr_chip_model_name: std::mem::transmute(load("pr_chip_model_name")),
             pr_chip_model_specs: std::mem::transmute(load("pr_chip_model_specs")),
             pr_chip_specs_by_name: std::mem::transmute(load("pr_chip_specs_by_name")),
-            pr_probe_detect_target_info: std::mem::transmute(load("pr_probe_detect_target_info")),
         }
     }
 }
@@ -191,7 +190,7 @@ fn parse_args_from<I: Iterator<Item = String>>(
             "--no-chip-erase" => chip_erase = false,
             "--help" => {
                 println!(
-                    "Usage: --chip <name> --programmer-type <type> [--probe VID:PID[:SERIAL]] [--file <path>] [--protocol swd|jtag] [--speed KHZ] [--op list|check|flash|chips|detect|spec] [--base 0xADDR] [--dll <path>] [--verify|--no-verify] [--preverify|--no-preverify] [--chip-erase|--no-chip-erase]\nSupported programmer types: cmsis-dap, stlink, jlink, ftdi, esp-usb-jtag, wch-link, sifli-uart, glasgow, ch347-usb-jtag\nExtra ops:\n  chips  - list supported manufacturers and chip models\n  detect - identify connected target chip via probe\n  spec   - print detailed spec of --chip"
+                    "Usage: --chip <name> --programmer-type <type> [--probe VID:PID[:SERIAL]] [--file <path>] [--protocol swd|jtag] [--speed KHZ] [--op list|check|flash|chips|spec|erase-all] [--base 0xADDR] [--dll <path>] [--verify|--no-verify] [--preverify|--no-preverify] [--chip-erase|--no-chip-erase]\\nSupported programmer types: cmsis-dap, stlink, jlink, ftdi, esp-usb-jtag, wch-link, sifli-uart, glasgow, ch347-usb-jtag\\nExtra ops:\\n  chips  - list supported manufacturers and chip models\\n  spec   - print detailed spec of --chip\\n  erase-all - perform a full chip erase"
                 );
                 std::process::exit(0);
             }
@@ -430,6 +429,22 @@ fn main() {
             }
             println!("Flash complete");
         },
+        "erase-all" => unsafe {
+            let chip = match chip {
+                Some(c) => c,
+                None => {
+                    eprintln!("--chip required for erase-all");
+                    std::process::exit(1);
+                }
+            };
+            let c_chip = CString::new(chip).unwrap();
+            let rc = (ffi.pr_chip_erase)(c_chip.as_ptr(), speed, proto_code(protocol));
+            if rc != 0 {
+                print_last_error(&ffi);
+                std::process::exit(rc);
+            }
+            println!("Chip erase complete");
+        },
         "chips" => unsafe {
             let m = (ffi.pr_chip_manufacturer_count)();
             println!("{} manufacturers", m);
@@ -465,52 +480,18 @@ fn main() {
                         "    - {}",
                         String::from_utf8_lossy(&cname).trim_end_matches('\0')
                     );
-                }
-            }
-        },
-        "detect" => unsafe {
-            let n = (ffi.pr_probe_count)();
-            if n == 0 {
-                eprintln!("no probes found");
-                std::process::exit(2);
-            }
-            for i in 0..n {
-                let mut mi: u32 = u32::MAX;
-                let mut ci: u32 = u32::MAX;
-                let mut name = vec![0u8; 128];
-                let rc = (ffi.pr_probe_detect_target_info)(
-                    i,
-                    &mut mi as *mut u32,
-                    &mut ci as *mut u32,
-                    name.as_mut_ptr() as *mut c_char,
-                    name.len(),
-                );
-                if rc <= 0 {
-                    print_last_error(&ffi);
-                    println!("[{}] detection failed", i);
-                    continue;
-                }
-                println!(
-                    "[{}] detected {} (manu={}, model={})",
-                    i,
-                    String::from_utf8_lossy(&name).trim_end_matches('\0'),
-                    mi,
-                    ci
-                );
-                // Also dump brief specs
-                if mi != u32::MAX && ci != u32::MAX {
-                    let need = (ffi.pr_chip_model_specs)(mi, ci, std::ptr::null_mut(), 0);
-                    if need > 0 {
-                        let mut buf = vec![0u8; need];
+                    let spec_need = (ffi.pr_chip_model_specs)(mi, ci, std::ptr::null_mut(), 0);
+                    if spec_need > 0 {
+                        let mut spec = vec![0u8; spec_need];
                         (ffi.pr_chip_model_specs)(
                             mi,
                             ci,
-                            buf.as_mut_ptr() as *mut c_char,
-                            buf.len(),
+                            spec.as_mut_ptr() as *mut c_char,
+                            spec.len(),
                         );
                         println!(
-                            "    specs: {}",
-                            String::from_utf8_lossy(&buf).trim_end_matches('\0')
+                            "      {}",
+                            String::from_utf8_lossy(&spec).trim_end_matches('\0')
                         );
                     }
                 }
@@ -526,20 +507,18 @@ fn main() {
             };
             let c_chip = CString::new(chip).unwrap();
             let need = (ffi.pr_chip_specs_by_name)(c_chip.as_ptr(), std::ptr::null_mut(), 0);
-            if need == 0 {
-                print_last_error(&ffi);
-                std::process::exit(3);
+            if need > 0 {
+                let mut spec = vec![0u8; need];
+                (ffi.pr_chip_specs_by_name)(
+                    c_chip.as_ptr(),
+                    spec.as_mut_ptr() as *mut c_char,
+                    spec.len(),
+                );
+                println!("{}", String::from_utf8_lossy(&spec).trim_end_matches('\0'));
             }
-            let mut buf = vec![0u8; need];
-            (ffi.pr_chip_specs_by_name)(
-                c_chip.as_ptr(),
-                buf.as_mut_ptr() as *mut c_char,
-                buf.len(),
-            );
-            println!("{}", String::from_utf8_lossy(&buf).trim_end_matches('\0'));
         },
         _ => {
-            eprintln!("unknown --op");
+            eprintln!("Unknown operation: {}", op);
             std::process::exit(1);
         }
     }

@@ -99,6 +99,99 @@ fn build_chip_db() -> ChipDb {
     }
 }
 
+fn do_chip_erase(chip: &str, speed_khz: u32, proto: Option<WireProtocol>) -> i32 {
+    let lister = Lister::new();
+    let mut probes = lister.list_all();
+    if let Some(ty) = *programmer_type_lock().lock().unwrap() {
+        probes.retain(|p| info_matches_type(p, ty));
+    }
+    if probes.is_empty() {
+        set_error("no matching probes found".to_string());
+        return -1;
+    }
+
+    let target = match registry().get_target_by_name(chip) {
+        Ok(t) => t,
+        Err(e) => {
+            set_error(format!("failed to get target: {}", e));
+            return -1;
+        }
+    };
+
+    let mut probe = match probes[0].open() {
+        Ok(p) => p,
+        Err(e) => {
+            set_error(format!("failed to open probe: {}", e));
+            return -1;
+        }
+    };
+
+    if let Some(p) = proto {
+        if let Err(e) = probe.select_protocol(p) {
+            set_error(format!("failed to select protocol: {}", e));
+            return -1;
+        }
+    }
+
+    if speed_khz > 0 {
+        if let Err(e) = probe.set_speed(speed_khz) {
+            set_error(format!("failed to set speed: {}", e));
+            return -1;
+        }
+    }
+
+    let mut session = match probe.attach(target, Permissions::new()) {
+        Ok(s) => s,
+        Err(e) => {
+            set_error(format!("failed to attach: {}", e));
+            return -1;
+        }
+    };
+
+    let mut progress = FlashProgress::new(|_| {});
+    let res = flashing::erase_all(&mut session, &mut progress);
+    match res {
+        Ok(_) => 0,
+        Err(e) => {
+            set_error(e.to_string());
+            -1
+        }
+    }
+}
+
+/// Erase the entire flash memory of a target chip.
+///
+/// This function attempts to connect to a target chip and erase its entire
+/// non-volatile memory.
+///
+/// # Arguments
+///
+/// * `chip` - A C-style string specifying the target chip model (e.g., "stm32f407").
+/// * `speed_khz` - The desired debug probe speed in kilohertz. If 0, a default speed is used.
+/// * `protocol_code` - An integer code representing the wire protocol to use:
+///   - 1 for SWD
+///   - 2 for JTAG
+///   - Any other value defaults to the probe's default protocol.
+///
+/// # Returns
+///
+/// * `0` on success.
+/// * `-1` on failure. Call `pr_get_last_error` to retrieve a detailed error message.
+///
+/// # Safety
+///
+/// This function is unsafe because it dereferences a raw pointer (`chip`). The caller
+/// must ensure that `chip` is a valid, null-terminated C string.
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_chip_erase(chip: *const c_char, speed_khz: u32, protocol_code: i32) -> i32 {
+    let Ok(chip_str) = cstr_to_string(chip) else {
+        set_error("invalid chip string".to_string());
+        return -1;
+    };
+    let proto = protocol_from_int(protocol_code);
+    do_chip_erase(&chip_str, speed_khz, proto)
+}
+
 fn chip_db() -> &'static ChipDb {
     CHIP_DB.get_or_init(build_chip_db)
 }
@@ -319,63 +412,6 @@ pub extern "C" fn pr_chip_specs_by_name(
         slice[n] = 0;
     }
     need
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_probe_detect_target_info(
-    index: u32,
-    out_manufacturer_index: *mut u32,
-    out_chip_index: *mut u32,
-    name_buf: *mut c_char,
-    name_buf_len: usize,
-) -> i32 {
-    let lister = Lister::new();
-    let probes = lister.list_all();
-    let Some(info) = probes.get(index as usize) else {
-        set_error("probe index out of range".to_string());
-        return -1;
-    };
-
-    let probe = match info.open() {
-        Ok(p) => p,
-        Err(e) => {
-            set_error(format!("open probe error: {}", e));
-            return -1;
-        }
-    };
-
-    let session = match probe.attach_with_registry((), Permissions::default(), registry()) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(format!("attach_with_registry error: {}", e));
-            return 0;
-        }
-    };
-    let tname = session.target().name.clone();
-    let (mi, ci) = match chip_db().name_to_index.get(&tname) {
-        Some(&(mi, ci)) => (mi, ci),
-        None => (u32::MAX, u32::MAX),
-    };
-    unsafe {
-        if !out_manufacturer_index.is_null() {
-            *out_manufacturer_index = mi;
-        }
-        if !out_chip_index.is_null() {
-            *out_chip_index = ci;
-        }
-    }
-    let bytes = tname.as_bytes();
-    let need = bytes.len().saturating_add(1);
-    if !name_buf.is_null() && name_buf_len > 0 {
-        let copy = need.min(name_buf_len);
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(name_buf as *mut u8, copy);
-            let n = copy.saturating_sub(1);
-            slice[..n].copy_from_slice(&bytes[..n]);
-            slice[n] = 0;
-        }
-    }
-    1
 }
 
 fn set_error(msg: String) {

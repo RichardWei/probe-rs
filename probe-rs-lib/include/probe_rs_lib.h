@@ -167,6 +167,18 @@ int32_t pr_flash_bin(const char* chip, const char* path, uint64_t base_address, 
 /* Auto-detect format (by file extension): .elf/.axf => ELF, .hex/.ihex => HEX, .bin => BIN (requires base_address) */
 int32_t pr_flash_auto(const char* chip, const char* path, uint64_t base_address, uint32_t skip, int32_t verify, int32_t preverify, int32_t chip_erase, uint32_t speed_khz, int32_t protocol_code);
 
+/*
+ * Perform a chip-wide erase.
+ *
+ * Parameters:
+ *  - chip: Target chip name string (must match targets database, e.g. "stm32f407zet6").
+ *  - speed_khz: Debug wire speed in kHz; set to 0 to keep default driver speed.
+ *  - protocol_code: Debug protocol (0 = Auto, 1 = SWD, 2 = JTAG).
+ *
+ * Returns 0 on success; non-zero error code on failure. Use pr_last_error() to retrieve details.
+ */
+int32_t pr_chip_erase(const char* chip, uint32_t speed_khz, int32_t protocol_code);
+
 /* Chip database and detection */
 /*
    Manufacturer & Chip Listing
@@ -188,20 +200,9 @@ uint32_t pr_chip_manufacturer_count(void);
 size_t   pr_chip_manufacturer_name(uint32_t index, char* buf, size_t buf_len);
 uint32_t pr_chip_model_count(uint32_t manu_index);
 size_t   pr_chip_model_name(uint32_t manu_index, uint32_t chip_index, char* buf, size_t buf_len);
-size_t   pr_chip_model_specs(uint32_t manu_index, uint32_t chip_index, char* buf, size_t buf_len);
-size_t   pr_chip_specs_by_name(const char* name, char* buf, size_t buf_len);
+size_t pr_chip_model_specs(uint32_t manu_index, uint32_t chip_index, char *buf, size_t buf_len);
+size_t pr_chip_specs_by_name(const char *name, char *buf, size_t buf_len);
 
-/*
-   Probe-based target detection
-   - Tries to attach using the configured programmer type.
-   - On success, fills manufacturer/chip indexes if known, and writes target name.
-   Returns: >0 success; 0/negative on failure; use pr_last_error() for details.
-*/
-int32_t  pr_probe_detect_target_info(uint32_t probe_index,
-                                    uint32_t* out_manufacturer_index,
-                                    uint32_t* out_chip_index,
-                                    char* name_buf,
-                                    size_t name_buf_len);
 
 #ifdef __cplusplus
 }
