@@ -57,6 +57,8 @@ struct Ffi {
     pr_chip_model_name: unsafe extern "C" fn(u32, u32, *mut c_char, usize) -> usize,
     pr_chip_model_specs: unsafe extern "C" fn(u32, u32, *mut c_char, usize) -> usize,
     pr_chip_specs_by_name: unsafe extern "C" fn(*const c_char, *mut c_char, usize) -> usize,
+    pr_read_16: unsafe extern "C" fn(u64, u32, u64, *mut u16, u32) -> i32,
+    pr_write_16: unsafe extern "C" fn(u64, u32, u64, *const u16, u32) -> i32,
 }
 
 fn load_ffi(dll_path: &str) -> Ffi {
@@ -100,6 +102,8 @@ fn load_ffi(dll_path: &str) -> Ffi {
             pr_chip_model_name: std::mem::transmute(load("pr_chip_model_name")),
             pr_chip_model_specs: std::mem::transmute(load("pr_chip_model_specs")),
             pr_chip_specs_by_name: std::mem::transmute(load("pr_chip_specs_by_name")),
+            pr_read_16: std::mem::transmute(load("pr_read_16")),
+            pr_write_16: std::mem::transmute(load("pr_write_16")),
         }
     }
 }
@@ -134,6 +138,8 @@ fn parse_args_from<I: Iterator<Item = String>>(
     bool,
     bool,
     Option<String>,
+    Option<u32>,
+    Vec<u16>,
 ) {
     // English comments: very simple argument parser without external crates
     let mut chip = None;
@@ -148,6 +154,8 @@ fn parse_args_from<I: Iterator<Item = String>>(
     let mut preverify = false;
     let mut chip_erase = true;
     let mut programmer_type: Option<String> = None;
+    let mut len = None;
+    let mut data = Vec::new();
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -188,9 +196,27 @@ fn parse_args_from<I: Iterator<Item = String>>(
             "--no-preverify" => preverify = false,
             "--chip-erase" => chip_erase = true,
             "--no-chip-erase" => chip_erase = false,
+            "--len" => len = args.next().and_then(|v| v.parse().ok()),
+            "--data" => {
+                if let Some(s) = args.next() {
+                    for part in s.split(',') {
+                        let part = part.trim();
+                        let val = if let Some(hex) =
+                            part.strip_prefix("0x").or_else(|| part.strip_prefix("0X"))
+                        {
+                            u16::from_str_radix(hex, 16).ok()
+                        } else {
+                            part.parse().ok()
+                        };
+                        if let Some(v) = val {
+                            data.push(v);
+                        }
+                    }
+                }
+            }
             "--help" => {
                 println!(
-                    "Usage: --chip <name> --programmer-type <type> [--probe VID:PID[:SERIAL]] [--file <path>] [--protocol swd|jtag] [--speed KHZ] [--op list|check|flash|chips|spec|erase-all] [--base 0xADDR] [--dll <path>] [--verify|--no-verify] [--preverify|--no-preverify] [--chip-erase|--no-chip-erase]\\nSupported programmer types: cmsis-dap, stlink, jlink, ftdi, esp-usb-jtag, wch-link, sifli-uart, glasgow, ch347-usb-jtag\\nExtra ops:\\n  chips  - list supported manufacturers and chip models\\n  spec   - print detailed spec of --chip\\n  erase-all - perform a full chip erase"
+                    "Usage: --chip <name> --programmer-type <type> [--probe VID:PID[:SERIAL]] [--file <path>] [--protocol swd|jtag] [--speed KHZ] [--op list|check|flash|chips|spec|erase-all|read16|write16] [--base 0xADDR] [--dll <path>] [--verify|--no-verify] [--preverify|--no-preverify] [--chip-erase|--no-chip-erase] [--len N] [--data 0x1234,0x5678]\\nSupported programmer types: cmsis-dap, stlink, jlink, ftdi, esp-usb-jtag, wch-link, sifli-uart, glasgow, ch347-usb-jtag\\nExtra ops:\\n  chips  - list supported manufacturers and chip models\\n  spec   - print detailed spec of --chip\\n  erase-all - perform a full chip erase\\n  read16 - read 16-bit memory\\n  write16 - write 16-bit memory"
                 );
                 std::process::exit(0);
             }
@@ -210,6 +236,8 @@ fn parse_args_from<I: Iterator<Item = String>>(
         preverify,
         chip_erase,
         programmer_type,
+        len,
+        data,
     )
 }
 
@@ -226,6 +254,8 @@ fn parse_args() -> (
     bool,
     bool,
     Option<String>,
+    Option<u32>,
+    Vec<u16>,
 ) {
     parse_args_from(env::args().skip(1))
 }
@@ -270,6 +300,8 @@ fn main() {
         preverify,
         chip_erase,
         programmer_type,
+        len,
+        data,
     ) = parse_args();
     let dll = if dll_hint.is_empty() {
         let mut p = std::env::current_exe().expect("get current exe failed");
@@ -445,6 +477,86 @@ fn main() {
             }
             println!("Chip erase complete");
         },
+        "read16" => unsafe {
+            let chip = match chip {
+                Some(c) => c,
+                None => {
+                    eprintln!("--chip required for read16");
+                    std::process::exit(1);
+                }
+            };
+            let c_chip = CString::new(chip).unwrap();
+            let handle = if let Some(sel) = probe.clone() {
+                let c_sel = CString::new(sel).unwrap();
+                (ffi.pr_session_open_with_probe)(
+                    c_sel.as_ptr(),
+                    c_chip.as_ptr(),
+                    speed,
+                    proto_code(protocol),
+                )
+            } else {
+                (ffi.pr_session_open_auto)(c_chip.as_ptr(), speed, proto_code(protocol))
+            };
+            if handle == 0 {
+                print_last_error(&ffi);
+                std::process::exit(3);
+            }
+
+            let addr = base.unwrap_or(0);
+            let count = len.unwrap_or(1);
+            let mut buf = vec![0u16; count as usize];
+            let rc = (ffi.pr_read_16)(handle, 0, addr, buf.as_mut_ptr(), count);
+            if rc != 0 {
+                print_last_error(&ffi);
+                let _ = (ffi.pr_session_close)(handle);
+                std::process::exit(rc);
+            }
+            print!("Read {:#x}:", addr);
+            for val in buf {
+                print!(" {:#06x}", val);
+            }
+            println!();
+            let _ = (ffi.pr_session_close)(handle);
+        },
+        "write16" => unsafe {
+            let chip = match chip {
+                Some(c) => c,
+                None => {
+                    eprintln!("--chip required for write16");
+                    std::process::exit(1);
+                }
+            };
+            if data.is_empty() {
+                eprintln!("--data required for write16");
+                std::process::exit(1);
+            }
+            let c_chip = CString::new(chip).unwrap();
+            let handle = if let Some(sel) = probe.clone() {
+                let c_sel = CString::new(sel).unwrap();
+                (ffi.pr_session_open_with_probe)(
+                    c_sel.as_ptr(),
+                    c_chip.as_ptr(),
+                    speed,
+                    proto_code(protocol),
+                )
+            } else {
+                (ffi.pr_session_open_auto)(c_chip.as_ptr(), speed, proto_code(protocol))
+            };
+            if handle == 0 {
+                print_last_error(&ffi);
+                std::process::exit(3);
+            }
+
+            let addr = base.unwrap_or(0);
+            let rc = (ffi.pr_write_16)(handle, 0, addr, data.as_ptr(), data.len() as u32);
+            if rc != 0 {
+                print_last_error(&ffi);
+                let _ = (ffi.pr_session_close)(handle);
+                std::process::exit(rc);
+            }
+            println!("Write complete");
+            let _ = (ffi.pr_session_close)(handle);
+        },
         "chips" => unsafe {
             let m = (ffi.pr_chip_manufacturer_count)();
             println!("{} manufacturers", m);
@@ -592,7 +704,7 @@ mod tests {
             "--no-preverify",
             "--chip-erase",
         ]);
-        let (_, _, _, protocol, speed, _, _, _, verify, preverify, chip_erase, _) =
+        let (_, _, _, protocol, speed, _, _, _, verify, preverify, chip_erase, _, _, _) =
             parse_args_from(args);
         match protocol {
             Protocol::Swd => {}
@@ -607,35 +719,48 @@ mod tests {
     #[test]
     fn parse_base_formats() {
         let args_hex = make_args(&["--base", "0x1000"]);
-        let (_, _, _, _, _, _, base_hex, _, _, _, _, _) = parse_args_from(args_hex);
+        let (_, _, _, _, _, _, base_hex, _, _, _, _, _, _, _) = parse_args_from(args_hex);
         assert_eq!(base_hex, Some(0x1000));
 
         let args_bin = make_args(&["--base", "0b1010"]);
-        let (_, _, _, _, _, _, base_bin, _, _, _, _, _) = parse_args_from(args_bin);
+        let (_, _, _, _, _, _, base_bin, _, _, _, _, _, _, _) = parse_args_from(args_bin);
         assert_eq!(base_bin, Some(10));
 
         let args_oct = make_args(&["--base", "0o77"]);
-        let (_, _, _, _, _, _, base_oct, _, _, _, _, _) = parse_args_from(args_oct);
+        let (_, _, _, _, _, _, base_oct, _, _, _, _, _, _, _) = parse_args_from(args_oct);
         assert_eq!(base_oct, Some(63));
 
         let args_dec = make_args(&["--base", "4096"]);
-        let (_, _, _, _, _, _, base_dec, _, _, _, _, _) = parse_args_from(args_dec);
+        let (_, _, _, _, _, _, base_dec, _, _, _, _, _, _, _) = parse_args_from(args_dec);
         assert_eq!(base_dec, Some(4096));
     }
 
     #[test]
     fn parse_ops_chips_detect_spec() {
         let a_chips = make_args(&["--op", "chips"]);
-        let (_, _, _, _, _, op_chips, _, _, _, _, _, _) = parse_args_from(a_chips);
+        let (_, _, _, _, _, op_chips, _, _, _, _, _, _, _, _) = parse_args_from(a_chips);
         assert_eq!(op_chips, Some("chips".to_string()));
 
         let a_detect = make_args(&["--op", "detect"]);
-        let (_, _, _, _, _, op_detect, _, _, _, _, _, _) = parse_args_from(a_detect);
+        let (_, _, _, _, _, op_detect, _, _, _, _, _, _, _, _) = parse_args_from(a_detect);
         assert_eq!(op_detect, Some("detect".to_string()));
 
         let a_spec = make_args(&["--op", "spec", "--chip", "nrf51822_Xxaa"]);
-        let (chip, _, _, _, _, op_spec, _, _, _, _, _, _) = parse_args_from(a_spec);
+        let (chip, _, _, _, _, op_spec, _, _, _, _, _, _, _, _) = parse_args_from(a_spec);
         assert_eq!(op_spec, Some("spec".to_string()));
         assert_eq!(chip, Some("nrf51822_Xxaa".to_string()));
+    }
+
+    #[test]
+    fn parse_read16_write16_params() {
+        let args_read = make_args(&["--op", "read16", "--len", "10"]);
+        let (_, _, _, _, _, op_read, _, _, _, _, _, _, len, _) = parse_args_from(args_read);
+        assert_eq!(op_read, Some("read16".to_string()));
+        assert_eq!(len, Some(10));
+
+        let args_write = make_args(&["--op", "write16", "--data", "0x12,0x34,56"]);
+        let (_, _, _, _, _, op_write, _, _, _, _, _, _, _, data) = parse_args_from(args_write);
+        assert_eq!(op_write, Some("write16".to_string()));
+        assert_eq!(data, vec![0x12, 0x34, 56]);
     }
 }

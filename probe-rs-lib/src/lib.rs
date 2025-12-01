@@ -1433,6 +1433,77 @@ pub extern "C" fn pr_write_8(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn pr_read_16(
+    session: u64,
+    core_index: u32,
+    address: u64,
+    buf: *mut u16,
+    len_words: u32,
+) -> i32 {
+    if buf.is_null() {
+        set_error("buf is null".to_string());
+        return -1;
+    }
+    let Ok(sess) = get_session(session) else {
+        set_error("invalid session handle".to_string());
+        return -1;
+    };
+    let mut lock = sess.lock().unwrap();
+    let mut tmp = vec![0u16; len_words as usize];
+    match lock.core(core_index as usize) {
+        Ok(mut core) => match core.read_16(address, &mut tmp) {
+            Ok(_) => {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(tmp.as_ptr(), buf, len_words as usize);
+                }
+                0
+            }
+            Err(e) => {
+                set_error(format!("read_16 error: {}", e));
+                -2
+            }
+        },
+        Err(e) => {
+            set_error(format!("core access error: {}", e));
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pr_write_16(
+    session: u64,
+    core_index: u32,
+    address: u64,
+    buf: *const u16,
+    len_words: u32,
+) -> i32 {
+    if buf.is_null() {
+        set_error("buf is null".to_string());
+        return -1;
+    }
+    let Ok(sess) = get_session(session) else {
+        set_error("invalid session handle".to_string());
+        return -1;
+    };
+    let mut lock = sess.lock().unwrap();
+    let slice = unsafe { std::slice::from_raw_parts(buf, len_words as usize) };
+    match lock.core(core_index as usize) {
+        Ok(mut core) => match core.write_16(address, slice) {
+            Ok(_) => 0,
+            Err(e) => {
+                set_error(format!("write_16 error: {}", e));
+                -2
+            }
+        },
+        Err(e) => {
+            set_error(format!("core access error: {}", e));
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn pr_read_32(
     session: u64,
     core_index: u32,

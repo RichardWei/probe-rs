@@ -86,10 +86,16 @@ int32_t pr_core_status(uint64_t session, uint32_t core_index);
 
 /*
  Memory operations
- - Read/Write 8-bit and 32-bit buffers.
+ - Read/Write 8-bit, 16-bit and 32-bit buffers.
 */
 int32_t pr_read_8(uint64_t session, uint32_t core_index, uint64_t address, uint8_t* buf, uint32_t len);
 int32_t pr_write_8(uint64_t session, uint32_t core_index, uint64_t address, const uint8_t* buf, uint32_t len);
+
+/* Read 16-bit words from target memory. len_words is the number of u16 items. */
+int32_t pr_read_16(uint64_t session, uint32_t core_index, uint64_t address, uint16_t* buf, uint32_t len_words);
+/* Write 16-bit words to target memory. len_words is the number of u16 items. */
+int32_t pr_write_16(uint64_t session, uint32_t core_index, uint64_t address, const uint16_t* buf, uint32_t len_words);
+
 int32_t pr_read_32(uint64_t session, uint32_t core_index, uint64_t address, uint32_t* buf, uint32_t len_words);
 int32_t pr_write_32(uint64_t session, uint32_t core_index, uint64_t address, const uint32_t* buf, uint32_t len_words);
 
