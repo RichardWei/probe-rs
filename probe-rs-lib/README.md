@@ -15,7 +15,7 @@
 - 头文件：`probe_rs_lib.h`
 - 链接：
   - Windows（通过导入库链接动态库）：链接 `probe_rs_lib.lib`；运行时仍需 `probe_rs_lib.dll`
-  - Windows（静态）：链接 `probe_rs_lib_static.lib`，并补充 `lib/native-static-libs.txt` 列出的原生库；其中 `windows.*.lib` 在下载包的 `lib/native/` 目录中，可为该目录添加 `/LIBPATH`。其他系统库由 MSVC/Windows SDK 提供；无需本项目的 `probe_rs_lib.dll`
+  - Windows（静态）：C++ 代码使用 MSVC `/MD`（与本库静态链接参数中的 `/defaultlib:msvcrt` 一致），链接 `probe_rs_lib_static.lib` 并补充 `lib/native-static-libs.txt` 列出的原生库；其中 `windows.*.lib` 在下载包的 `lib/native/` 目录中，可为该目录添加 `/LIBPATH`。其他系统库由 MSVC/Windows SDK 提供；无需本项目的 `probe_rs_lib.dll`
   - 或使用 `LoadLibrary/GetProcAddress` 仅依赖 `dll`
   - macOS：链接 `libprobe_rs_lib.dylib`，运行时将动态库放在可执行文件旁并设置相应的 rpath（例如 `@loader_path`）
   - macOS（静态）：链接 `libprobe_rs_lib.a`，并补充 Rust 编译器列出的系统库及 framework；无需本项目的 `libprobe_rs_lib.dylib`
