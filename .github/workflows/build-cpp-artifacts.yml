@@ -93,10 +93,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path package/lib/native | Out-Null
           for ($i = 0; $i -lt $nativeArgs.Count; $i++) {
             if ($nativeArgs[$i] -match '^windows\.(\d+\.\d+\.\d+)\.lib$') {
-              $version = $Matches[1]
               $name = $nativeArgs[$i]
               $candidates = @(Get-ChildItem -LiteralPath $registrySrc -Directory | ForEach-Object {
-                Join-Path $_.FullName "windows_x86_64_msvc-$version/lib/$name"
+                Get-ChildItem -LiteralPath $_.FullName -Directory -Filter 'windows_x86_64_msvc-*'
+              } | ForEach-Object {
+                Join-Path $_.FullName "lib/$name"
               } | Where-Object { Test-Path -LiteralPath $_ })
               if ($candidates.Count -ne 1) { throw "Expected one Cargo registry copy of $name, found $($candidates.Count) under $registrySrc" }
               $packaged = Join-Path (Resolve-Path package/lib/native).Path $name
