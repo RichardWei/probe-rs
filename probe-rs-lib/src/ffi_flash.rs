@@ -80,7 +80,7 @@ struct OwnedLayout {
     fills: Vec<PrFlashFill>,
     data_blocks: Vec<PrFlashSpan>,
     // Keep the source pages (including their byte buffers) alive during the callback.
-    source: FlashLayout,
+    _source: FlashLayout,
 }
 
 fn operation_code(operation: ProgressOperation) -> i32 {
@@ -117,7 +117,7 @@ fn forward_event(event: ProgressEvent, callback: PrProgressCallback, context: *m
                 let pages = source.pages().iter().map(|v| PrFlashPage { address: v.address(), size: v.size(), data: v.data().as_ptr() }).collect();
                 let fills = source.fills().iter().map(|v| PrFlashFill { address: v.address(), size: v.size(), page_index: v.page_index() }).collect();
                 let data_blocks = source.data_blocks().iter().map(|v| PrFlashSpan { address: v.address(), size: v.size() }).collect();
-                owned_layouts.push(OwnedLayout { sectors, pages, fills, data_blocks, source });
+                owned_layouts.push(OwnedLayout { sectors, pages, fills, data_blocks, _source: source });
             }
             for layout in &owned_layouts {
                 layout_views.push(PrFlashLayout {
