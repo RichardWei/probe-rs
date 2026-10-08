@@ -329,6 +329,9 @@ fn run() -> Result<(), String> {
                 for ci in 0..models {
                     let n = (ffi.chip_model_name)(mi, ci, std::ptr::null_mut(), 0);
                     println!("  {}", read_text(n, |ptr,len| { (ffi.chip_model_name)(mi,ci,ptr,len); }));
+                    let spec_len = (ffi.chip_model_specs)(mi, ci, std::ptr::null_mut(), 0);
+                    if spec_len == 0 { return Err(last_error(&ffi)); }
+                    println!("    {}", read_text(spec_len, |ptr,len| { (ffi.chip_model_specs)(mi,ci,ptr,len); }));
                 }
             }
         },

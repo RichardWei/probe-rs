@@ -14,7 +14,7 @@ probe-rs-lib-cli --op chips
 probe-rs-lib-cli --op spec --chip STM32H750VBTx
 ```
 
-`detect` 不传 `--chip` 时使用 probe-rs 的 `TargetSelector::Auto`；`check` 也可按同样方式自动识别。`chips` 和 `spec` 只读内置数据库，不需要探针或 `--programmer-type`。`chips` 列出所有型号，不人为截断。
+`detect` 不传 `--chip` 时使用 probe-rs 的 `TargetSelector::Auto`；`check` 也可按同样方式自动识别。`chips` 和 `spec` 只读内置数据库，不需要探针或 `--programmer-type`。`chips` 列出所有型号及每个型号的规格 JSON，不人为截断。
 
 ## 烧录选项与默认值
 
