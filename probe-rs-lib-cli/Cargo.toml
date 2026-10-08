@@ -1,9 +1,14 @@
 [package]
 name = "probe-rs-lib-cli"
+autobins = false
 version.workspace = true
 edition.workspace = true
 description = "CLI validator that calls probe-rs-lib dynamic library via FFI"
 publish = false
+
+[[bin]]
+name = "probe-rs-lib-cli"
+path = "src/cli.rs"
 
 [package.metadata.dist]
 dist = false
