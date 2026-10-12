@@ -110,7 +110,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path static-smoke | Out-Null
           $archive = (Resolve-Path package/lib/probe_rs_lib_static.lib).Path
           "Static link inputs: $archive $($nativeArgs -join ' ')" | Tee-Object -FilePath logs/static-link.log -Append
-          cl /nologo /EHsc /std:c++17 /Ipackage/include probe-rs-lib/tests/ffi_smoke.cpp /link $archive $nativeArgs /OUT:static-smoke/ffi_smoke_static.exe 2>&1 | Tee-Object -FilePath logs/static-link.log -Append
+          cl /nologo /EHsc /std:c++17 /MD /Ipackage/include probe-rs-lib/tests/ffi_smoke.cpp /link /WX $archive $nativeArgs /OUT:static-smoke/ffi_smoke_static.exe 2>&1 | Tee-Object -FilePath logs/static-link.log -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $imports = dumpbin /dependents static-smoke/ffi_smoke_static.exe 2>&1 | Tee-Object -FilePath logs/static-link.log -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
