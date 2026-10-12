@@ -1,7 +1,7 @@
 use probe_rs::config::{Registry, TargetSelector};
 use probe_rs::flashing::{
     self, BinLoader, BinOptions, DownloadOptions, ElfLoader, ElfOptions, FlashProgress, HexLoader,
-    ImageLoader, ProgressEvent, ProgressOperation,
+    ImageLoader,
 };
 use probe_rs::probe::{DebugProbeSelector, Probe, WireProtocol, list::Lister};
 use probe_rs::probe::{
@@ -10,19 +10,21 @@ use probe_rs::probe::{
     sifliuart::SifliUartFactory, stlink::StLinkFactory, wlink::WchLinkFactory,
 };
 use probe_rs_espressif::espusbjtag::EspUsbJtagFactory;
-use probe_rs::{CoreStatus, MemoryInterface, Permissions, Session, SessionConfig};
+use probe_rs::{BreakpointCause, CoreStatus, HaltReason, MemoryInterface, Permissions, Session, SessionConfig};
 use probe_rs_target::MemoryRegion;
 use std::collections::HashMap;
-use std::ffi::{CStr, c_char};
+use std::cell::RefCell;
+use std::error::Error;
+use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 
-static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+mod ffi_flash;
+
+thread_local! { static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) }; }
 static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<Session>>>>> = OnceLock::new();
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
-type ProgressCb = unsafe extern "C" fn(i32, f32, *const c_char, i32);
-static PROGRESS_CB: OnceLock<Mutex<Option<ProgressCb>>> = OnceLock::new();
 #[derive(Clone, Copy)]
 enum ProgrammerType {
     CmsisDap,
@@ -35,7 +37,6 @@ enum ProgrammerType {
     Glasgow,
     Ch347UsbJtag,
 }
-static PROGRAMMER_TYPE: OnceLock<Mutex<Option<ProgrammerType>>> = OnceLock::new();
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
 
 #[derive(Clone)]
@@ -113,64 +114,6 @@ fn build_chip_db() -> ChipDb {
     }
 }
 
-fn do_chip_erase(chip: &str, speed_khz: u32, proto: Option<WireProtocol>) -> i32 {
-    let mut session = match attach_selected(
-        chip,
-        speed_khz,
-        proto,
-        Permissions::new().allow_erase_all(),
-    ) {
-        Ok(session) => session,
-        Err(e) => {
-            set_error(e);
-            return -1;
-        }
-    };
-
-    let mut progress = FlashProgress::empty();
-    let res = flashing::erase_all(&mut session, &mut progress, false);
-    match res {
-        Ok(_) => 0,
-        Err(e) => {
-            set_error(e.to_string());
-            -1
-        }
-    }
-}
-
-/// Erase the entire flash memory of a target chip.
-///
-/// This function attempts to connect to a target chip and erase its entire
-/// non-volatile memory.
-///
-/// # Arguments
-///
-/// * `chip` - A C-style string specifying the target chip model (e.g., "stm32f407").
-/// * `speed_khz` - The desired debug probe speed in kilohertz. If 0, a default speed is used.
-/// * `protocol_code` - An integer code representing the wire protocol to use:
-///   - 1 for SWD
-///   - 2 for JTAG
-///   - Any other value defaults to the probe's default protocol.
-///
-/// # Returns
-///
-/// * `0` on success.
-/// * `-1` on failure. Call `pr_get_last_error` to retrieve a detailed error message.
-///
-/// # Safety
-///
-/// This function is unsafe because it dereferences a raw pointer (`chip`). The caller
-/// must ensure that `chip` is a valid, null-terminated C string.
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_chip_erase(chip: *const c_char, speed_khz: u32, protocol_code: i32) -> i32 {
-    let Ok(chip_str) = cstr_to_string(chip) else {
-        set_error("invalid chip string".to_string());
-        return -1;
-    };
-    let proto = protocol_from_int(protocol_code);
-    do_chip_erase(&chip_str, speed_khz, proto)
-}
-
 fn chip_db() -> &'static ChipDb {
     CHIP_DB.get_or_init(build_chip_db)
 }
@@ -185,36 +128,26 @@ fn make_target_spec_string(manufacturer: &str, chip_name: &str) -> Result<String
     let cores = target
         .cores
         .iter()
-        .map(|c| format!("{}:{:?}", c.name, c.core_type))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .map(|c| serde_json::json!({"name": c.name, "type": format!("{:?}", c.core_type)}))
+        .collect::<Vec<_>>();
 
     let mut ram_total: u64 = 0;
     let mut nvm_total: u64 = 0;
-    let mut regions: Vec<String> = Vec::new();
+    let mut regions = Vec::new();
     for region in target.memory_map.iter() {
         match region {
             MemoryRegion::Ram(r) => {
                 let size = r.range.end.saturating_sub(r.range.start);
                 ram_total = ram_total.saturating_add(size);
-                regions.push(format!(
-                    "Ram({:#010x}-{:#010x})",
-                    r.range.start, r.range.end
-                ));
+                regions.push(serde_json::json!({"kind": "Ram", "start": r.range.start, "end": r.range.end}));
             }
             MemoryRegion::Nvm(n) => {
                 let size = n.range.end.saturating_sub(n.range.start);
                 nvm_total = nvm_total.saturating_add(size);
-                regions.push(format!(
-                    "Nvm({:#010x}-{:#010x})",
-                    n.range.start, n.range.end
-                ));
+                regions.push(serde_json::json!({"kind": "Nvm", "start": n.range.start, "end": n.range.end, "is_alias": n.is_alias}));
             }
             MemoryRegion::Generic(g) => {
-                regions.push(format!(
-                    "Generic({:#010x}-{:#010x})",
-                    g.range.start, g.range.end
-                ));
+                regions.push(serde_json::json!({"kind": "Generic", "start": g.range.start, "end": g.range.end}));
             }
         }
     }
@@ -223,9 +156,8 @@ fn make_target_spec_string(manufacturer: &str, chip_name: &str) -> Result<String
         .flash_algorithms
         .iter()
         .map(|a| a.name.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let default_fmt = target.default_format.clone().unwrap_or_default();
+        .collect::<Vec<_>>();
+    let default_fmt = target.default_format.clone();
 
     Ok(serde_json::json!({
         "manufacturer": manufacturer,
@@ -234,7 +166,7 @@ fn make_target_spec_string(manufacturer: &str, chip_name: &str) -> Result<String
         "cores": cores,
         "ram_bytes": ram_total,
         "nvm_bytes": nvm_total,
-        "regions": regions.join(";"),
+        "regions": regions,
         "flash_algorithms": flash_algos,
         "default_format": default_fmt,
     })
@@ -269,13 +201,15 @@ pub extern "C" fn pr_chip_manufacturer_name(index: u32, buf: *mut c_char, buf_le
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pr_chip_model_count(manufacturer_index: u32) -> u32 {
+pub extern "C" fn pr_chip_model_count(manufacturer_index: u32, out_count: *mut u32) -> i32 {
+    if out_count.is_null() { set_error("out_count is null".into()); return -1; }
     let db = chip_db();
     let Some(m) = db.manufacturers.get(manufacturer_index as usize) else {
         set_error("manufacturer index out of range".to_string());
-        return 0;
+        return -1;
     };
-    m.chips.len() as u32
+    unsafe { *out_count = m.chips.len() as u32; }
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -393,33 +327,18 @@ pub extern "C" fn pr_chip_specs_by_name(
 }
 
 fn set_error(msg: String) {
-    let lock = LAST_ERROR.get_or_init(|| Mutex::new(String::new()));
-    let mut s = lock.lock().unwrap();
-    *s = msg;
+    LAST_ERROR.with(|last| *last.borrow_mut() = msg);
 }
 
-fn progress_cb_lock() -> &'static Mutex<Option<ProgressCb>> {
-    PROGRESS_CB.get_or_init(|| Mutex::new(None))
-}
-
-fn op_code(op: ProgressOperation) -> i32 {
-    match op {
-        ProgressOperation::Erase => 1,
-        ProgressOperation::Program => 2,
-        ProgressOperation::Verify => 3,
-        ProgressOperation::Fill => 0,
-        ProgressOperation::Ram => 4,
+fn error_chain(error: &dyn Error) -> String {
+    let mut result = error.to_string();
+    let mut source = error.source();
+    while let Some(next) = source {
+        result.push_str(": ");
+        result.push_str(&next.to_string());
+        source = next.source();
     }
-}
-
-fn status_text(op: ProgressOperation) -> &'static str {
-    match op {
-        ProgressOperation::Erase => "erasing",
-        ProgressOperation::Program => "programming",
-        ProgressOperation::Verify => "verifying",
-        ProgressOperation::Fill => "filling",
-        ProgressOperation::Ram => "writing ram",
-    }
+    result
 }
 
 fn cstr_to_string(ptr: *const c_char) -> Result<String, String> {
@@ -446,10 +365,6 @@ fn parse_programmer_type(name: &str) -> Option<ProgrammerType> {
         "ch347-usb-jtag" | "ch347usbjtag" => Some(ProgrammerType::Ch347UsbJtag),
         _ => None,
     }
-}
-
-fn programmer_type_lock() -> &'static Mutex<Option<ProgrammerType>> {
-    PROGRAMMER_TYPE.get_or_init(|| Mutex::new(None))
 }
 
 fn type_to_code(ty: ProgrammerType) -> i32 {
@@ -527,26 +442,27 @@ fn configure_probe(
     speed_khz: u32,
     protocol: Option<WireProtocol>,
 ) -> Result<Probe, String> {
-    if let Some(protocol) = protocol {
-        probe
-            .select_protocol(protocol)
-            .map_err(|error| format!("select protocol error: {error}"))?;
-    }
     if speed_khz > 0 {
         probe
             .set_speed(speed_khz)
-            .map_err(|error| format!("set speed error: {error}"))?;
+            .map_err(|error| format!("set speed error: {}", error_chain(&error)))?;
+    }
+    if let Some(protocol) = protocol {
+        probe
+            .select_protocol(protocol)
+            .map_err(|error| format!("select protocol error: {}", error_chain(&error)))?;
     }
     Ok(probe)
 }
 
 fn attach_selected(
-    chip: &str,
+    chip: TargetSelector,
     speed_khz: u32,
     protocol: Option<WireProtocol>,
     permissions: Permissions,
+    programmer_type: Option<ProgrammerType>,
 ) -> Result<Session, String> {
-    if let Some(kind) = *programmer_type_lock().lock().unwrap() {
+    if let Some(kind) = programmer_type {
         let info = lister()
             .list_all()
             .into_iter()
@@ -554,17 +470,17 @@ fn attach_selected(
             .ok_or_else(|| "no probe matching programmer type".to_string())?;
         let probe = info
             .open()
-            .map_err(|error| format!("open probe error: {error}"))?;
+            .map_err(|error| format!("open probe error: {}", error_chain(&error)))?;
         configure_probe(probe, speed_khz, protocol)?
             .attach(chip, permissions)
-            .map_err(|error| format!("attach error: {error}"))
+            .map_err(|error| format!("attach error: {}", error_chain(&error)))
     } else {
         let config = SessionConfig {
             permissions,
             speed: (speed_khz > 0).then_some(speed_khz),
             protocol,
         };
-        Session::auto_attach(chip, config).map_err(|error| format!("attach error: {error}"))
+        Session::auto_attach(chip, config).map_err(|error| format!("attach error: {}", error_chain(&error)))
     }
 }
 
@@ -576,242 +492,12 @@ fn protocol_from_int(code: i32) -> Option<WireProtocol> {
     }
 }
 
-fn detect_format_from_path(
-    path: &str,
-    base: Option<u64>,
-    skip: u32,
-) -> Result<Box<dyn ImageLoader>, String> {
-    let extension = std::path::Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "elf" | "axf" => Ok(Box::new(ElfLoader(ElfOptions::default()))),
-        "hex" | "ihex" => Ok(Box::new(HexLoader)),
-        "bin" => Ok(Box::new(BinLoader(BinOptions {
-            base_address: Some(base.ok_or("base_address required for bin format")?),
-            skip,
-        }))),
-        _ => Err("unsupported file format extension".to_string()),
-    }
+fn target_selector(chip: *const c_char) -> Result<TargetSelector, String> {
+    if chip.is_null() { Ok(TargetSelector::Auto) } else { cstr_to_string(chip).map(TargetSelector::from) }
 }
 
-fn do_flash(
-    chip: &str,
-    path: &str,
-    format: Box<dyn ImageLoader>,
-    verify: i32,
-    preverify: i32,
-    chip_erase: i32,
-    speed_khz: u32,
-    proto: Option<WireProtocol>,
-) -> i32 {
-    let mut opts = DownloadOptions::default();
-    opts.verify = verify != 0;
-    opts.preverify = preverify != 0;
-    opts.do_chip_erase = chip_erase != 0;
-
-    if let Some(cb) = *progress_cb_lock().lock().unwrap() {
-        use std::time::Duration;
-
-        let mut t_erase: Option<u64> = None;
-        let mut d_erase: u64 = 0;
-        let mut tm_erase: Duration = Duration::ZERO;
-        let mut t_prog: Option<u64> = None;
-        let mut d_prog: u64 = 0;
-        let mut tm_prog: Duration = Duration::ZERO;
-        let mut t_verify: Option<u64> = None;
-        let mut d_verify: u64 = 0;
-        let mut tm_verify: Duration = Duration::ZERO;
-        let mut t_fill: Option<u64> = None;
-        let mut d_fill: u64 = 0;
-        let mut tm_fill: Duration = Duration::ZERO;
-        let mut t_ram: Option<u64> = None;
-        let mut d_ram: u64 = 0;
-        let mut tm_ram: Duration = Duration::ZERO;
-        let mut last_erase_pct: f32 = -1.0;
-        let mut last_prog_pct: f32 = -1.0;
-        let mut last_verify_pct: f32 = -1.0;
-        let mut last_fill_pct: f32 = -1.0;
-        let mut last_ram_pct: f32 = -1.0;
-
-        opts.progress = FlashProgress::new(move |event| match event {
-            ProgressEvent::AddProgressBar { operation, total } => {
-                match operation {
-                    ProgressOperation::Erase => {
-                        t_erase = total;
-                        d_erase = 0;
-                        tm_erase = Duration::ZERO;
-                    }
-                    ProgressOperation::Program => {
-                        t_prog = total;
-                        d_prog = 0;
-                        tm_prog = Duration::ZERO;
-                    }
-                    ProgressOperation::Verify => {
-                        t_verify = total;
-                        d_verify = 0;
-                        tm_verify = Duration::ZERO;
-                    }
-                    ProgressOperation::Fill => {
-                        t_fill = total;
-                        d_fill = 0;
-                        tm_fill = Duration::ZERO;
-                    }
-                    ProgressOperation::Ram => {
-                        t_ram = total;
-                        d_ram = 0;
-                        tm_ram = Duration::ZERO;
-                    }
-                }
-                match operation {
-                    ProgressOperation::Erase => {
-                        last_erase_pct = -1.0;
-                    }
-                    ProgressOperation::Program => {
-                        last_prog_pct = -1.0;
-                    }
-                    ProgressOperation::Verify => {
-                        last_verify_pct = -1.0;
-                    }
-                    ProgressOperation::Fill => {
-                        last_fill_pct = -1.0;
-                    }
-                    ProgressOperation::Ram => {
-                        last_ram_pct = -1.0;
-                    }
-                }
-            }
-            ProgressEvent::Started(op) => {
-                let st = status_text(op);
-                let cs = std::ffi::CString::new(st).unwrap();
-                unsafe { cb(op_code(op), 0.0, cs.as_ptr(), -1) };
-                match op {
-                    ProgressOperation::Erase => {
-                        last_erase_pct = 0.0;
-                    }
-                    ProgressOperation::Program => {
-                        last_prog_pct = 0.0;
-                    }
-                    ProgressOperation::Verify => {
-                        last_verify_pct = 0.0;
-                    }
-                    ProgressOperation::Fill => {
-                        last_fill_pct = 0.0;
-                    }
-                    ProgressOperation::Ram => {
-                        last_ram_pct = 0.0;
-                    }
-                }
-            }
-            ProgressEvent::Progress {
-                operation,
-                size,
-                time,
-            } => {
-                let (total_opt, d_ref, tm_ref) = match operation {
-                    ProgressOperation::Erase => (&t_erase, &mut d_erase, &mut tm_erase),
-                    ProgressOperation::Program => (&t_prog, &mut d_prog, &mut tm_prog),
-                    ProgressOperation::Verify => (&t_verify, &mut d_verify, &mut tm_verify),
-                    ProgressOperation::Fill => (&t_fill, &mut d_fill, &mut tm_fill),
-                    ProgressOperation::Ram => (&t_ram, &mut d_ram, &mut tm_ram),
-                };
-                *d_ref = d_ref.saturating_add(size);
-                *tm_ref += time;
-                let total = total_opt.unwrap_or(0);
-                let percent = if total > 0 {
-                    ((*d_ref as f64 / total as f64) * 100.0) as f32
-                } else {
-                    0.0
-                };
-                let eta_ms = if total > 0 && *tm_ref > Duration::ZERO {
-                    let remaining = total.saturating_sub(*d_ref) as f64;
-                    let rate = (*d_ref as f64) / tm_ref.as_secs_f64();
-                    if rate > 0.0 {
-                        (remaining / rate * 1000.0) as i32
-                    } else {
-                        -1
-                    }
-                } else {
-                    -1
-                };
-                let st = status_text(operation);
-                let cs = std::ffi::CString::new(st).unwrap();
-                let last = match operation {
-                    ProgressOperation::Erase => &mut last_erase_pct,
-                    ProgressOperation::Program => &mut last_prog_pct,
-                    ProgressOperation::Verify => &mut last_verify_pct,
-                    ProgressOperation::Fill => &mut last_fill_pct,
-                    ProgressOperation::Ram => &mut last_ram_pct,
-                };
-                let pct = percent.min(100.0);
-                let changed = (pct - *last).abs() >= 0.1 || pct >= 100.0;
-                if changed {
-                    unsafe { cb(op_code(operation), pct, cs.as_ptr(), eta_ms) };
-                    *last = pct;
-                }
-            }
-            ProgressEvent::Finished(op) => {
-                let st = status_text(op);
-                let cs = std::ffi::CString::new(st).unwrap();
-                let last = match op {
-                    ProgressOperation::Erase => &mut last_erase_pct,
-                    ProgressOperation::Program => &mut last_prog_pct,
-                    ProgressOperation::Verify => &mut last_verify_pct,
-                    ProgressOperation::Fill => &mut last_fill_pct,
-                    ProgressOperation::Ram => &mut last_ram_pct,
-                };
-                if *last < 100.0 {
-                    unsafe { cb(op_code(op), 100.0, cs.as_ptr(), 0) };
-                    *last = 100.0;
-                }
-            }
-            ProgressEvent::Failed(op) => {
-                let st = status_text(op);
-                let cs = std::ffi::CString::new(st).unwrap();
-                unsafe { cb(op_code(op), 0.0, cs.as_ptr(), -1) };
-                match op {
-                    ProgressOperation::Erase => {
-                        last_erase_pct = 0.0;
-                    }
-                    ProgressOperation::Program => {
-                        last_prog_pct = 0.0;
-                    }
-                    ProgressOperation::Verify => {
-                        last_verify_pct = 0.0;
-                    }
-                    ProgressOperation::Fill => {
-                        last_fill_pct = 0.0;
-                    }
-                    ProgressOperation::Ram => {
-                        last_ram_pct = 0.0;
-                    }
-                }
-            }
-            ProgressEvent::FlashLayoutReady { .. } | ProgressEvent::DiagnosticMessage { .. } => {}
-        });
-    }
-
-    let permissions = if chip_erase != 0 {
-        Permissions::new().allow_erase_all()
-    } else {
-        Permissions::new()
-    };
-    let mut session = match attach_selected(chip, speed_khz, proto, permissions) {
-        Ok(session) => session,
-        Err(error) => {
-            set_error(error);
-            return 1;
-        }
-    };
-    match flashing::download_file_with_options(&mut session, path, format, opts) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_error(format!("flash error: {}", e));
-            2
-        }
-    }
+fn requested_programmer_type(code: i32) -> Result<Option<ProgrammerType>, String> {
+    if code == 0 { Ok(None) } else { code_to_type(code).map(Some).ok_or_else(|| "invalid programmer type code".into()) }
 }
 
 fn sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<Session>>>> {
@@ -838,10 +524,7 @@ fn get_session(handle: u64) -> Result<Arc<Mutex<Session>>, String> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pr_last_error(buf: *mut c_char, buf_len: usize) -> usize {
-    let s = {
-        let lock = LAST_ERROR.get_or_init(|| Mutex::new(String::new()));
-        lock.lock().unwrap().clone()
-    };
+    let s = LAST_ERROR.with(|last| last.borrow().clone());
     let bytes = s.as_bytes();
     let need = bytes.len() + 1;
     if buf.is_null() || buf_len == 0 {
@@ -873,20 +556,6 @@ pub extern "C" fn pr_version(buf: *mut c_char, buf_len: usize) -> usize {
         slice[n] = 0;
     }
     need
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_set_progress_callback(cb: ProgressCb) {
-    let lock = progress_cb_lock();
-    let mut l = lock.lock().unwrap();
-    *l = Some(cb);
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_clear_progress_callback() {
-    let lock = progress_cb_lock();
-    let mut l = lock.lock().unwrap();
-    *l = None;
 }
 
 #[unsafe(no_mangle)]
@@ -948,125 +617,21 @@ pub extern "C" fn pr_probe_info(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pr_probe_features(
-    index: u32,
-    out_driver_flags: *mut u32,
-    out_feature_flags: *mut u32,
-) -> i32 {
-    let lister = lister();
-    let probes = lister.list_all();
-    let Some(info) = probes.get(index as usize) else {
-        set_error("probe index out of range".to_string());
-        return -1;
-    };
-
-    let mut driver_flags: u32 = 0;
-    if info.is_probe_type::<CmsisDapFactory>() {
-        driver_flags |= 0x00000001;
-    }
-    if info.is_probe_type::<JLinkFactory>() {
-        driver_flags |= 0x00000002;
-    }
-    if info.is_probe_type::<StLinkFactory>() {
-        driver_flags |= 0x00000004;
-    }
-    if info.is_probe_type::<FtdiProbeFactory>() {
-        driver_flags |= 0x00000008;
-    }
-    if info.is_probe_type::<EspUsbJtagFactory>() {
-        driver_flags |= 0x00000010;
-    }
-    if info.is_probe_type::<WchLinkFactory>() {
-        driver_flags |= 0x00000020;
-    }
-    if info.is_probe_type::<SifliUartFactory>() {
-        driver_flags |= 0x00000040;
-    }
-    if info.is_probe_type::<GlasgowFactory>() {
-        driver_flags |= 0x00000080;
-    }
-    if info.is_probe_type::<Ch347Factory>() {
-        driver_flags |= 0x00000100;
-    }
-
-    let mut feature_flags: u32 = 0;
-    let mut probe = match info.open() {
-        Ok(p) => p,
-        Err(e) => {
-            set_error(format!("open probe error: {}", e));
-            return -1;
-        }
-    };
-
-    if probe.select_protocol(WireProtocol::Swd).is_ok() {
-        feature_flags |= 0x00000001;
-    }
-    if probe.select_protocol(WireProtocol::Jtag).is_ok() {
-        feature_flags |= 0x00000002;
-    }
-    if probe.has_arm_debug_interface() {
-        feature_flags |= 0x00000004;
-    }
-    if probe.has_riscv_interface() {
-        feature_flags |= 0x00000008;
-    }
-    if probe.has_xtensa_interface() {
-        feature_flags |= 0x00000010;
-    }
-    if probe.get_swo_interface().is_some() {
-        feature_flags |= 0x00000020;
-    }
-    if probe.set_speed(1000).is_ok() {
-        feature_flags |= 0x00000040;
-    }
-
-    unsafe {
-        if !out_driver_flags.is_null() {
-            *out_driver_flags = driver_flags;
-        }
-        if !out_feature_flags.is_null() {
-            *out_feature_flags = feature_flags;
-        }
-    }
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_probe_check_target(index: u32) -> i32 {
-    let lister = lister();
-    let probes = lister.list_all();
-    let Some(info) = probes.get(index as usize) else {
-        set_error("probe index out of range".to_string());
-        return -1;
-    };
-
-    let mut probe = match info.open() {
-        Ok(p) => p,
-        Err(e) => {
-            set_error(format!("open probe error: {}", e));
-            return -1;
-        }
-    };
-
-    let mut last_err: Option<String> = None;
-    for proto in [WireProtocol::Swd, WireProtocol::Jtag] {
-        if probe.select_protocol(proto).is_err() {
-            continue;
-        }
-        match probe.attach_to_unspecified() {
-            Ok(()) => {
-                let _ = probe.detach();
-                return 1;
-            }
-            Err(e) => {
-                last_err = Some(format!("attach failed: {}", e));
-            }
-        }
-    }
-
-    if let Some(msg) = last_err {
-        set_error(msg);
-    }
+pub extern "C" fn pr_probe_driver_flags(index: u32, out_flags: *mut u32) -> i32 {
+    if out_flags.is_null() { set_error("out_flags is null".into()); return -1; }
+    let probes = lister().list_all();
+    let Some(info) = probes.get(index as usize) else { set_error("probe index out of range".into()); return -1; };
+    let mut flags = 0u32;
+    if info.is_probe_type::<CmsisDapFactory>() { flags |= 1 << 0; }
+    if info.is_probe_type::<JLinkFactory>() { flags |= 1 << 1; }
+    if info.is_probe_type::<StLinkFactory>() { flags |= 1 << 2; }
+    if info.is_probe_type::<FtdiProbeFactory>() { flags |= 1 << 3; }
+    if info.is_probe_type::<EspUsbJtagFactory>() { flags |= 1 << 4; }
+    if info.is_probe_type::<WchLinkFactory>() { flags |= 1 << 5; }
+    if info.is_probe_type::<SifliUartFactory>() { flags |= 1 << 6; }
+    if info.is_probe_type::<GlasgowFactory>() { flags |= 1 << 7; }
+    if info.is_probe_type::<Ch347Factory>() { flags |= 1 << 8; }
+    unsafe { *out_flags = flags; }
     0
 }
 
@@ -1075,16 +640,18 @@ pub extern "C" fn pr_session_open_auto(
     chip: *const c_char,
     speed_khz: u32,
     protocol_code: i32,
+    allow_erase_all: i32,
+    programmer_type_code: i32,
 ) -> u64 {
-    let Ok(chip) = cstr_to_string(chip) else {
-        set_error("invalid chip".to_string());
-        return 0;
-    };
+    let chip = match target_selector(chip) { Ok(v) => v, Err(e) => { set_error(e); return 0; } };
+    let programmer_type = match requested_programmer_type(programmer_type_code) { Ok(v) => v, Err(e) => { set_error(e); return 0; } };
+    let permissions = if allow_erase_all != 0 { Permissions::new().allow_erase_all() } else { Permissions::new() };
     match attach_selected(
-        &chip,
+        chip,
         speed_khz,
         protocol_from_int(protocol_code),
-        Permissions::new(),
+        permissions,
+        programmer_type,
     ) {
         Ok(session) => make_handle(session),
         Err(error) => {
@@ -1094,102 +661,48 @@ pub extern "C" fn pr_session_open_auto(
     }
 }
 
-/// Identify the target attached to a probe using probe-rs's built-in auto detection.
-/// Returns the required UTF-8 name buffer length (including NUL), or zero on failure.
-/// Unknown catalog indexes are reported as UINT32_MAX.
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_probe_detect_target_info(
-    probe_index: u32,
-    out_manufacturer_index: *mut u32,
-    out_chip_index: *mut u32,
-    name_buf: *mut c_char,
-    name_buf_len: usize,
-) -> i32 {
-    let lister = lister();
-    let probes = lister.list_all();
-    let Some(info) = probes.get(probe_index as usize) else {
-        set_error("probe index out of range".to_string());
-        return 0;
-    };
-    if let Some(kind) = *programmer_type_lock().lock().unwrap()
-        && !info_matches_type(info, kind)
-    {
-        set_error("programmer type mismatch".to_string());
-        return 0;
-    }
-    let result = info
-        .open()
-        .map_err(|error| format!("open probe error: {error}"))
-        .and_then(|probe| {
-            probe
-                .attach(TargetSelector::Auto, Permissions::new())
-                .map_err(|error| format!("target detection error: {error}"))
-        });
-    let session = match result {
-        Ok(session) => session,
-        Err(error) => {
-            set_error(error);
-            return 0;
-        }
-    };
-    let name = &session.target().name;
-    let (manufacturer_index, chip_index) = chip_db()
-        .name_to_index
-        .get(name)
-        .copied()
-        .unwrap_or((u32::MAX, u32::MAX));
-    unsafe {
-        if !out_manufacturer_index.is_null() {
-            *out_manufacturer_index = manufacturer_index;
-        }
-        if !out_chip_index.is_null() {
-            *out_chip_index = chip_index;
-        }
-    }
-    write_c_string(name, name_buf, name_buf_len) as i32
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn pr_session_open_with_probe(
     selector: *const c_char,
     chip: *const c_char,
     speed_khz: u32,
     protocol_code: i32,
+    allow_erase_all: i32,
+    programmer_type_code: i32,
 ) -> u64 {
     let Ok(sel) = cstr_to_string(selector) else {
         set_error("invalid selector".to_string());
         return 0;
     };
-    let Ok(chip) = cstr_to_string(chip) else {
-        set_error("invalid chip".to_string());
-        return 0;
-    };
+    let chip = match target_selector(chip) { Ok(v) => v, Err(e) => { set_error(e); return 0; } };
+    let programmer_type = match requested_programmer_type(programmer_type_code) { Ok(v) => v, Err(e) => { set_error(e); return 0; } };
+    let permissions = if allow_erase_all != 0 { Permissions::new().allow_erase_all() } else { Permissions::new() };
     let lister = lister();
     let selector: DebugProbeSelector = match sel.parse() {
         Ok(s) => s,
         Err(e) => {
-            set_error(format!("selector parse error: {}", e));
+            set_error(format!("selector parse error: {}", error_chain(&e)));
             return 0;
         }
     };
-    let opened = if let Some(kind) = *programmer_type_lock().lock().unwrap() {
+    let opened = if let Some(kind) = programmer_type {
         lister
             .list(Some(&selector))
             .into_iter()
             .find(|info| info_matches_type(info, kind))
             .ok_or_else(|| "probe not found or programmer type mismatch".to_string())
-            .and_then(|info| info.open().map_err(|error| format!("open probe error: {error}")))
+            .and_then(|info| info.open().map_err(|error| format!("open probe error: {}", error_chain(&error))))
     } else {
         lister
             .open(selector)
-            .map_err(|error| format!("open probe error: {error}"))
+            .map_err(|error| format!("open probe error: {}", error_chain(&error)))
     };
     match opened
         .and_then(|probe| configure_probe(probe, speed_khz, protocol_from_int(protocol_code)))
         .and_then(|probe| {
             probe
-                .attach(chip, Permissions::new())
-                .map_err(|error| format!("attach error: {error}"))
+                .attach(chip, permissions)
+                .map_err(|error| format!("attach error: {}", error_chain(&error)))
         })
     {
         Ok(session) => make_handle(session),
@@ -1201,10 +714,26 @@ pub extern "C" fn pr_session_open_with_probe(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn pr_session_target_info(session: u64, out_manufacturer_index: *mut u32, out_chip_index: *mut u32, name_buf: *mut c_char, name_buf_len: usize) -> usize {
+    let session = match get_session(session) { Ok(v) => v, Err(e) => { set_error(e); return 0; } };
+    let session = session.lock().unwrap();
+    let name = &session.target().name;
+    let (manufacturer_index, chip_index) = chip_db().name_to_index.get(name).copied().unwrap_or((u32::MAX, u32::MAX));
+    unsafe {
+        if !out_manufacturer_index.is_null() { *out_manufacturer_index = manufacturer_index; }
+        if !out_chip_index.is_null() { *out_chip_index = chip_index; }
+    }
+    write_c_string(name, name_buf, name_buf_len)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn pr_session_close(session: u64) -> i32 {
     let mut map = sessions().lock().unwrap();
     match map.remove(&session) {
         Some(arc) => {
+            drop(map);
+            // Wait for an operation already using this handle before releasing the probe.
+            drop(arc.lock().unwrap());
             drop(arc);
             0
         }
@@ -1216,12 +745,12 @@ pub extern "C" fn pr_session_close(session: u64) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pr_core_count(session: u64) -> u32 {
-    let Ok(sess) = get_session(session) else {
-        return 0;
-    };
+pub extern "C" fn pr_core_count(session: u64, out_count: *mut u32) -> i32 {
+    if out_count.is_null() { set_error("out_count is null".into()); return -1; }
+    let sess = match get_session(session) { Ok(v) => v, Err(e) => { set_error(e); return -1; } };
     let lock = sess.lock().unwrap();
-    lock.list_cores().len() as u32
+    unsafe { *out_count = lock.list_cores().len() as u32; }
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -1336,30 +865,53 @@ pub extern "C" fn pr_core_reset_and_halt(session: u64, core_index: u32, timeout_
     }
 }
 
+#[repr(C)]
+pub struct PrCoreStatus {
+    pub state: i32, // 0=Unknown, 1=Running, 2=Halted, 3=LockedUp, 4=Sleeping
+    pub halt_reason: i32, // 0=none/unknown, 1=Multiple, 2=Breakpoint, 3=Exception, 4=Watchpoint, 5=Step, 6=Request, 7=External
+    pub breakpoint_cause: i32, // 0=none/unknown, 1=Hardware, 2=Software, 3=Semihosting
+}
+
 #[unsafe(no_mangle)]
-pub extern "C" fn pr_core_status(session: u64, core_index: u32) -> i32 {
-    let Ok(sess) = get_session(session) else {
-        set_error("invalid session handle".to_string());
-        return -1;
-    };
+pub extern "C" fn pr_core_status(session: u64, core_index: u32, out_status: *mut PrCoreStatus, semihosting_buf: *mut c_char, semihosting_buf_len: usize, out_semihosting_len: *mut usize) -> i32 {
+    if out_status.is_null() { set_error("out_status is null".into()); return -1; }
+    let sess = match get_session(session) { Ok(v) => v, Err(e) => { set_error(e); return -1; } };
     let mut lock = sess.lock().unwrap();
-    match lock.core(core_index as usize) {
-        Ok(mut core) => match core.status() {
-            Ok(st) => match st {
-                CoreStatus::Halted(_) => 1,
-                CoreStatus::Running => 2,
-                _ => 0,
-            },
-            Err(e) => {
-                set_error(format!("status error: {}", e));
-                -2
-            }
-        },
-        Err(e) => {
-            set_error(format!("core access error: {}", e));
-            -1
+    let mut core = match lock.core(core_index as usize) { Ok(v) => v, Err(e) => { set_error(format!("core access error: {e}")); return -1; } };
+    let status = match core.status() { Ok(v) => v, Err(e) => { set_error(format!("status error: {e}")); return -1; } };
+    let mut output = PrCoreStatus { state: 0, halt_reason: 0, breakpoint_cause: 0 };
+    let mut semihosting = String::new();
+    match status {
+        CoreStatus::Unknown => {}
+        CoreStatus::Running => output.state = 1,
+        CoreStatus::LockedUp => output.state = 3,
+        CoreStatus::Sleeping => output.state = 4,
+        CoreStatus::Halted(reason) => {
+            output.state = 2;
+            output.halt_reason = match reason {
+                HaltReason::Unknown => 0,
+                HaltReason::Multiple => 1,
+                HaltReason::Breakpoint(cause) => {
+                    output.breakpoint_cause = match cause {
+                        BreakpointCause::Unknown => 0,
+                        BreakpointCause::Hardware => 1,
+                        BreakpointCause::Software => 2,
+                        BreakpointCause::Semihosting(command) => { semihosting = format!("{command:?}"); 3 }
+                    };
+                    2
+                }
+                HaltReason::Exception => 3,
+                HaltReason::Watchpoint => 4,
+                HaltReason::Step => 5,
+                HaltReason::Request => 6,
+                HaltReason::External => 7,
+            };
         }
     }
+    unsafe { *out_status = output; }
+    let needed = write_c_string(&semihosting, semihosting_buf, semihosting_buf_len);
+    unsafe { if !out_semihosting_len.is_null() { *out_semihosting_len = needed; } }
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -1576,15 +1128,13 @@ pub extern "C" fn pr_write_32(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn pr_registers_count(session: u64, core_index: u32) -> u32 {
-    let Ok(sess) = get_session(session) else {
-        set_error("invalid session handle".to_string());
-        return 0;
-    };
+pub extern "C" fn pr_registers_count(session: u64, core_index: u32, out_count: *mut u32) -> i32 {
+    if out_count.is_null() { set_error("out_count is null".into()); return -1; }
+    let sess = match get_session(session) { Ok(v) => v, Err(e) => { set_error(e); return -1; } };
     let mut lock = sess.lock().unwrap();
     match lock.core(core_index as usize) {
-        Ok(core) => core.registers().all_registers().count() as u32,
-        Err(_) => 0,
+        Ok(core) => { unsafe { *out_count = core.registers().all_registers().count() as u32; } 0 },
+        Err(e) => { set_error(format!("core access error: {e}")); -1 },
     }
 }
 
@@ -1595,8 +1145,10 @@ pub extern "C" fn pr_register_info(
     reg_index: u32,
     reg_id: *mut u16,
     bit_size: *mut u32,
+    data_type: *mut i32,
     name: *mut c_char,
     name_len: usize,
+    out_name_len: *mut usize,
 ) -> i32 {
     let Ok(sess) = get_session(session) else {
         set_error("invalid session handle".to_string());
@@ -1622,19 +1174,17 @@ pub extern "C" fn pr_register_info(
                 probe_rs::RegisterDataType::FloatingPoint(bits) => bits as u32,
             };
         }
+        if !data_type.is_null() {
+            *data_type = match desc.data_type {
+                probe_rs::RegisterDataType::UnsignedInteger(_) => 1,
+                probe_rs::RegisterDataType::FloatingPoint(_) => 2,
+            };
+        }
     }
     // Primary display name from register descriptor
     let name_str = desc.name();
-    let bytes = name_str.as_bytes();
-    if !name.is_null() && name_len > 0 {
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(name as *mut u8, name_len);
-            let n = name_len.saturating_sub(1);
-            let m = n.min(bytes.len());
-            slice[..m].copy_from_slice(&bytes[..m]);
-            slice[m] = 0;
-        }
-    }
+    let needed = write_c_string(name_str, name, name_len);
+    unsafe { if !out_name_len.is_null() { *out_name_len = needed; } }
     0
 }
 
@@ -1791,167 +1341,6 @@ pub extern "C" fn pr_clear_all_hw_breakpoints(session: u64) -> i32 {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_flash_elf(
-    chip: *const c_char,
-    path: *const c_char,
-    verify: i32,
-    preverify: i32,
-    chip_erase: i32,
-    speed_khz: u32,
-    protocol_code: i32,
-) -> i32 {
-    let chip = match cstr_to_string(chip) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let path = match cstr_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let fmt: Box<dyn ImageLoader> = Box::new(ElfLoader(ElfOptions::default()));
-    do_flash(
-        &chip,
-        &path,
-        fmt,
-        verify,
-        preverify,
-        chip_erase,
-        speed_khz,
-        protocol_from_int(protocol_code),
-    )
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_flash_hex(
-    chip: *const c_char,
-    path: *const c_char,
-    verify: i32,
-    preverify: i32,
-    chip_erase: i32,
-    speed_khz: u32,
-    protocol_code: i32,
-) -> i32 {
-    let chip = match cstr_to_string(chip) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let path = match cstr_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let fmt: Box<dyn ImageLoader> = Box::new(HexLoader);
-    do_flash(
-        &chip,
-        &path,
-        fmt,
-        verify,
-        preverify,
-        chip_erase,
-        speed_khz,
-        protocol_from_int(protocol_code),
-    )
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_flash_bin(
-    chip: *const c_char,
-    path: *const c_char,
-    base_address: u64,
-    skip: u32,
-    verify: i32,
-    preverify: i32,
-    chip_erase: i32,
-    speed_khz: u32,
-    protocol_code: i32,
-) -> i32 {
-    let chip = match cstr_to_string(chip) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let path = match cstr_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let fmt: Box<dyn ImageLoader> = Box::new(BinLoader(BinOptions {
-        base_address: Some(base_address),
-        skip,
-    }));
-    do_flash(
-        &chip,
-        &path,
-        fmt,
-        verify,
-        preverify,
-        chip_erase,
-        speed_khz,
-        protocol_from_int(protocol_code),
-    )
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_flash_auto(
-    chip: *const c_char,
-    path: *const c_char,
-    base_address: u64,
-    skip: u32,
-    verify: i32,
-    preverify: i32,
-    chip_erase: i32,
-    speed_khz: u32,
-    protocol_code: i32,
-) -> i32 {
-    let chip = match cstr_to_string(chip) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let path = match cstr_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(e);
-            return 1;
-        }
-    };
-    let fmt = match detect_format_from_path(&path, Some(base_address).filter(|v| *v != 0), skip) {
-        Ok(f) => f,
-        Err(msg) => {
-            set_error(msg);
-            return 1;
-        }
-    };
-    do_flash(
-        &chip,
-        &path,
-        fmt,
-        verify,
-        preverify,
-        chip_erase,
-        speed_khz,
-        protocol_from_int(protocol_code),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1969,34 +1358,24 @@ mod tests {
     #[test]
     fn invalid_chip_sets_error() {
         let chip = CString::new("not_a_real_chip").unwrap();
-        let handle = pr_session_open_auto(chip.as_ptr(), 0, 0);
+        let handle = pr_session_open_auto(chip.as_ptr(), 0, 0, 0, 0);
         assert_eq!(handle, 0);
         let need = pr_last_error(std::ptr::null_mut(), 0);
         assert!(need > 0);
     }
 
     #[test]
-    fn detect_format_exts() {
-        for path in ["firmware.elf", "app.axf", "image.hex", "image.ihex"] {
-            assert!(detect_format_from_path(path, None, 0).is_ok());
-        }
-        assert!(detect_format_from_path("unknown.xyz", None, 0).is_err());
+    fn invalid_session_count_is_not_a_valid_zero() {
+        let mut count = u32::MAX;
+        assert_ne!(pr_core_count(u64::MAX, &mut count), 0);
+        assert_eq!(count, u32::MAX);
     }
 
     #[test]
-    fn detect_format_from_path_bin_requires_base() {
-        let ok = detect_format_from_path("blob.bin", Some(0x08000000), 0);
-        assert!(ok.is_ok());
-        let err = detect_format_from_path("blob.bin", None, 0);
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn detect_format_from_path_elf_hex() {
-        let ok_elf = detect_format_from_path("firmware.elf", None, 0);
-        assert!(ok_elf.is_ok());
-        let ok_hex = detect_format_from_path("image.hex", None, 0);
-        assert!(ok_hex.is_ok());
+    fn invalid_manufacturer_count_is_not_a_valid_zero() {
+        let mut count = u32::MAX;
+        assert_ne!(pr_chip_model_count(u32::MAX, &mut count), 0);
+        assert_eq!(count, u32::MAX);
     }
 
     #[test]
@@ -2013,8 +1392,12 @@ mod tests {
         let mut buf = vec![0u8; need];
         let wrote = pr_chip_specs_by_name(name.as_ptr(), buf.as_mut_ptr() as *mut i8, buf.len());
         assert_eq!(wrote, need);
-        let s = String::from_utf8_lossy(&buf);
-        assert!(s.contains("\"chip\":"));
+        let s = String::from_utf8_lossy(&buf[..need - 1]);
+        let spec: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(spec["chip"], "nrf51822_Xxaa");
+        assert!(spec["cores"].is_array());
+        assert!(spec["regions"].is_array());
+        assert!(spec["flash_algorithms"].is_array());
     }
 
     #[test]
@@ -2023,7 +1406,8 @@ mod tests {
         assert!(m > 0);
         for mi in 0..m.min(32) {
             // limit iterations
-            let c = pr_chip_model_count(mi);
+            let mut c = 0;
+            assert_eq!(pr_chip_model_count(mi, &mut c), 0);
             if c > 0 {
                 let need = pr_chip_model_name(mi, 0, std::ptr::null_mut(), 0);
                 assert!(need > 0);
@@ -2038,30 +1422,6 @@ mod tests {
         panic!("no manufacturer with models found");
     }
 }
-// removed string-based programmer type setters/getters; use enum-based APIs and conversion helpers
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_set_programmer_type_code(type_code: i32) -> i32 {
-    let Some(ty) = code_to_type(type_code) else {
-        set_error("unsupported programmer type code".to_string());
-        return -1;
-    };
-    let lock = programmer_type_lock();
-    let mut l = lock.lock().unwrap();
-    *l = Some(ty);
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pr_get_programmer_type_code() -> i32 {
-    let lock = programmer_type_lock();
-    let l = lock.lock().unwrap();
-    match *l {
-        Some(t) => type_to_code(t),
-        None => -1,
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn pr_programmer_type_is_supported_code(type_code: i32) -> i32 {
     code_to_type(type_code).map(|_| 1).unwrap_or(0)
