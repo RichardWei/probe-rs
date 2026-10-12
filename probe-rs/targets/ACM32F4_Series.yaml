@@ -1,0 +1,234 @@
+name: ACM32F4 Series
+generated_from_pack: true
+pack_file_release: 1.0.2
+variants:
+- name: ACM32F403CCT7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x40000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20018000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+- name: ACM32F403CET7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x80000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20030000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+- name: ACM32F403KCU7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x40000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20018000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+- name: ACM32F403KEU7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x80000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20030000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+- name: ACM32F403RCT7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x40000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20018000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+- name: ACM32F403RET7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x80000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20030000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+- name: ACM32F403VCT7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x40000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20018000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+- name: ACM32F403VET7
+  cores:
+  - name: main
+    type: armv8m
+    core_access_options: !Arm
+      ap: !v1 0
+  memory_map:
+  - !Nvm
+    name: IROM1
+    range:
+      start: 0x0
+      end: 0x80000
+    cores:
+    - main
+    access:
+      write: false
+      boot: true
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20030000
+    cores:
+    - main
+  flash_algorithms:
+  - acm32f4_eflash
+flash_algorithms:
+- name: acm32f4_eflash
+  description: ACM32F4 512KB Flash
+  default: true
+  instructions: AbUAvwCYQR4AkQAo+tEIvQC1ACBtSQhgT/R6cP/38P9qSAAdAGgg8P8AaEkJHQhgZCD/9+X/AL9kSAAdAGgA8ABAACj40AC9T/SAEABoIPS/QED0FFBP9IARCGBP9MBwiGNP9DxwCGFP9MAgyGBwR0/0gBISaELwAQJP9IATGmBTSlpgAWAAv0/0gBJSaQLwAQIAKvjQT/SAEhJoIvABAk/0gBMaYHBHT/SAEQloQfACAU/0gBIRYEVJUWAAIQFgAL9P9IARSWkB8AEBACn40E/0gBEJaCHwAgFP9IASEWBwR0/0gBAAaEDwBABP9IARCGA3SEhgT/TQEMhgT/SEYIhjACAAYAC/T/SAEEBpAPABAAAo+NBP9IAQAGgg8AQAT/SAEQhgT/TAcIhjgALIYHBHMLUERg1GJEgQOABoIPSAMCJJEDkIYAhGAGhA9IAwCGBkIP/3VP8cSBQwAGhA8AEAGkkUMQhgCEYAaCD0gHAIYELyEHD/90P///dJ///3Y/8AIDC9AUYAIHBHALX/96j/ACAAvQC1A0YYRv/3hP8AIAC9LenwQQVGDkYXRgAkBuBX+ASAKBlBRv/3Wf8kHbRC9tMAIL3o8IEAABAIAUBVqqpVAAAAAA==
+  pc_init: 0x133
+  pc_uninit: 0x187
+  pc_program_page: 0x1a5
+  pc_erase_sector: 0x197
+  pc_erase_all: 0x18d
+  data_section_offset: 0x1d4
+  flash_properties:
+    address_range:
+      start: 0x0
+      end: 0x80000
+    page_size: 0x200
+    erased_byte_value: 0xff
+    program_page_timeout: 100
+    erase_sector_timeout: 1000
+    sectors:
+    - size: 0x200
+      address: 0x0
