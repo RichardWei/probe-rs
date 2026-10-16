@@ -23,11 +23,28 @@ jobs:
     env:
       VCPKGRS_DYNAMIC: 1
     steps:
+      - name: Configure Git default branch
+        shell: pwsh
+        run: git config --global init.defaultBranch main
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
-      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Configure MSVC x64 environment
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $installation) { throw 'Visual Studio with MSVC x64 tools was not found' }
+          $before = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          & (Join-Path $installation 'Common7/Tools/Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          Get-Command cl, link, dumpbin -ErrorAction Stop | Select-Object Name, Source
+          Get-ChildItem Env: | Where-Object { $before[$_.Name] -cne $_.Value } | ForEach-Object {
+            if ($_.Value -match '[\r\n]') { throw "Cannot export multiline environment variable: $($_.Name)" }
+            "$($_.Name)=$($_.Value)" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          }
       - name: Show build environment
         shell: pwsh
         run: |
@@ -142,11 +159,19 @@ jobs:
 
   macos-intel:
     runs-on: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
     steps:
+      - name: Configure Git default branch
+        shell: bash
+        run: git config --global init.defaultBranch main
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          # Keep native objects built for the old deployment target out of this cache.
+          shared-key: macos-intel-deployment-${{ env.MACOSX_DEPLOYMENT_TARGET }}
       - name: Show build environment
         run: |
           rustup show
@@ -154,6 +179,7 @@ jobs:
           rustc --version --verbose
           c++ --version
           uname -a
+          echo "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
       - name: Build all workspace targets with detailed output
         shell: bash
         run: |
@@ -260,21 +286,24 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/develop-cpp-fii'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
     steps:
+      - name: Configure Git default branch
+        shell: bash
+        run: git config --global init.defaultBranch main
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: cpp-*
-          path: release-assets
-          merge-multiple: true
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: tools-*
-          path: release-assets
-          merge-multiple: true
+      - name: Download release artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for artifact in cpp-windows-x64 tools-windows-x64 cpp-macos-intel tools-macos-intel; do
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir release-assets
+          done
       - name: Verify release assets and calculate checksums
         shell: bash
         run: |
