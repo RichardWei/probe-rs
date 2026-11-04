@@ -15,10 +15,13 @@ int main() {
         return 2;
     }
 
-    // Invalid index checks symbol linkage without requiring a physical probe.
-    if (pr_probe_detect_target_info(std::numeric_limits<uint32_t>::max(), nullptr,
-                                    nullptr, nullptr, 0) != 0) {
+    // Invalid handles check the new symbols without requiring hardware.
+    if (pr_session_target_info(std::numeric_limits<uint64_t>::max(), nullptr,
+                               nullptr, nullptr, 0) != 0) {
         return 3;
     }
+    if (pr_session_erase_all(std::numeric_limits<uint64_t>::max(), nullptr, nullptr) == 0) return 4;
+    if (pr_session_flash(std::numeric_limits<uint64_t>::max(), "firmware.hex", nullptr,
+                         nullptr, nullptr, nullptr) == 0) return 5;
     return 0;
 }
