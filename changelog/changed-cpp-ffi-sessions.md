@@ -1,0 +1,1 @@
+Changed the C/C++ API to use session-based flashing and erase operations with progress callbacks and configurable download options. Updated the CLI to dynamically load the library and expanded chip specification queries.
