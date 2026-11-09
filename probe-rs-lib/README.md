@@ -53,7 +53,7 @@ uint64_t pr_session_open_with_probe(const char *selector, const char *chip,
 
 ## 原始进度事件
 
-`pr_progress_event_cb` 接收与 `FlashProgress::new` 一一对应的事件。`kind`：`1` 布局就绪、`2` 增加进度条、`3` 开始、`4` 增量、`5` 完成、`6` 失败、`7` 诊断消息；`operation`：`0` Fill、`1` Erase、`2` Program、`3` Verify、`4` Ram，缺失时为 `-1`。增加进度条时由 `has_total` 区分未知总量与 `0`；增量事件给出本次字节数和耗时纳秒。布局事件包含各区域的 Sector、Page、Fill、Data Block；Page 数据指针也可在回调期间读取。
+`pr_progress_event_cb` 接收与 `FlashProgress::new` 一一对应的事件。`kind`：`1` 布局就绪、`2` 增加进度条、`3` 开始、`4` 增量、`5` 完成、`6` 失败、`7` 诊断消息；`operation`：`0` Fill、`1` Erase、`2` Program、`3` Verify、`4` Ram、`5` Compare，缺失时为 `-1`。增加进度条时由 `has_total` 区分未知总量与 `0`；增量事件给出本次字节数和耗时纳秒。布局事件包含各区域的 Sector、Page、Fill、Data Block；Page 数据指针也可在回调期间读取。
 
 诊断消息是 `message` 指向的 `message_len` 个 UTF-8 字节，可包含 NUL。所有事件和内层指针只在回调执行期间有效。需要异步显示时，C++ 调用端应复制所需字段。FFI 不产生百分比、ETA 或额外的成功事件。若不需要进度，传空回调即可。不要在回调内再次调用同一 Session 的操作，因为该 Session 正由当前操作使用。
 
