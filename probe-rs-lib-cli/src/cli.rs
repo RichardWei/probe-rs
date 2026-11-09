@@ -239,7 +239,7 @@ fn open_session<'a>(ffi: &'a Ffi, args: &Args, allow_erase_all: bool) -> Result<
 unsafe extern "C" fn progress(event: *const ProgressEvent, _: *mut c_void) {
     if event.is_null() { return; }
     let event = unsafe { &*event };
-    let operation = match event.operation { 0=>"fill",1=>"erase",2=>"program",3=>"verify",4=>"ram",_=>"" };
+    let operation = match event.operation { 0=>"fill",1=>"erase",2=>"program",3=>"verify",4=>"ram",5=>"compare",_=>"unknown" };
     match event.kind {
         1 => println!("layout ready: {} regions", event.layout_count),
         2 => if event.has_total != 0 { println!("{operation}: total {} bytes", event.total); } else { println!("{operation}: total unknown"); },
