@@ -147,7 +147,7 @@ typedef struct {
 } pr_flash_layout_t;
 /* kind: 1 LayoutReady, 2 AddProgressBar, 3 Started, 4 Progress,
  * 5 Finished, 6 Failed, 7 DiagnosticMessage.
- * operation: 0 Fill, 1 Erase, 2 Program, 3 Verify, 4 Ram, -1 if absent.
+ * operation: 0 Fill, 1 Erase, 2 Program, 3 Verify, 4 Ram, 5 Compare, -1 if absent.
  * For Progress, size is the byte increment and duration_ns is its elapsed time.
  * Pointers and their nested arrays remain valid only during the callback. */
 typedef struct {
