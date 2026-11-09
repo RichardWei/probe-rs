@@ -63,7 +63,7 @@ pub struct PrFlashLayout {
 #[repr(C)]
 pub struct PrProgressEvent {
     pub kind: i32, // 1=layout, 2=add-bar, 3=start, 4=progress, 5=finish, 6=fail, 7=message
-    pub operation: i32, // 0=Fill, 1=Erase, 2=Program, 3=Verify, 4=Ram; -1 when absent
+    pub operation: i32, // 0=Fill, 1=Erase, 2=Program, 3=Verify, 4=Ram, 5=Compare; -1 when absent
     pub has_total: i32,
     pub total: u64,
     pub size: u64,
@@ -90,6 +90,7 @@ fn operation_code(operation: ProgressOperation) -> i32 {
         ProgressOperation::Program => 2,
         ProgressOperation::Verify => 3,
         ProgressOperation::Ram => 4,
+        ProgressOperation::Compare => 5,
     }
 }
 
