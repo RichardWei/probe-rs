@@ -3,7 +3,7 @@ name: Build C++ bindings and tools
 on:
   push:
     branches:
-      - develop-cpp-fii
+      - develop
 
 permissions:
   contents: read
@@ -283,7 +283,7 @@ jobs:
 
   publish-release:
     needs: [windows-x64, macos-intel]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop-cpp-fii'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -325,7 +325,7 @@ jobs:
             exit 1
           fi
           date_utc=$(date -u +%Y%m%d)
-          tag="cpp-v${version}-develop-cpp-fii-${date_utc}-g${GITHUB_SHA:0:12}"
+          tag="cpp-v${version}-develop-${date_utc}-g${GITHUB_SHA:0:12}"
           echo "Publishing $tag for $GITHUB_SHA"
 
           if tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.sha' 2>/dev/null); then
@@ -347,8 +347,8 @@ jobs:
           else
             gh release create "$tag" release-assets/* \
               --verify-tag \
-              --title "C++ artifacts v${version} (develop-cpp-fii, ${date_utc})" \
-              --notes "Automated Windows x64 and Intel Mac build from develop-cpp-fii commit ${GITHUB_SHA}. Includes C++ libraries, CLI tools, and SHA-256 checksums." \
+              --title "C++ artifacts v${version} (develop, ${date_utc})" \
+              --notes "Automated Windows x64 and Intel Mac build from develop commit ${GITHUB_SHA}. Includes C++ libraries, CLI tools, and SHA-256 checksums." \
               --latest
           fi
           gh release view "$tag" --json url --jq '.url'
