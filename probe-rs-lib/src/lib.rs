@@ -581,12 +581,14 @@ pub extern "C" fn pr_probe_info(
         return -1;
     };
 
+    let probe_rs::probe::ProbeTransport::Usb(usb) = &info.transport;
+
     unsafe {
         if !vid.is_null() {
-            *vid = info.vendor_id;
+            *vid = usb.vendor_id;
         }
         if !pid.is_null() {
-            *pid = info.product_id;
+            *pid = usb.product_id;
         }
     }
 
@@ -602,7 +604,7 @@ pub extern "C" fn pr_probe_info(
         }
     }
 
-    let ser = info.serial_number.as_deref().unwrap_or("");
+    let ser = usb.serial_number.as_deref().unwrap_or("");
     let ser_bytes = ser.as_bytes();
     let copy_ser = ser_bytes.len().saturating_add(1).min(serial_len);
     if !serial.is_null() && copy_ser > 0 {
