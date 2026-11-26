@@ -24,6 +24,7 @@ size_t pr_version(char* buf, size_t buf_len);
  Probe listing
  - Count connected debug probes
  - Query probe info (identifier, VID, PID, optional serial)
+ - TCP transport returns zero VID/PID and an empty serial string.
 */
 uint32_t pr_probe_count(void);
 int32_t pr_probe_info(uint32_t index,
@@ -55,6 +56,7 @@ int32_t pr_probe_driver_flags(uint32_t index, uint32_t* out_flags);
 */
 uint64_t pr_session_open_auto(const char* chip, uint32_t speed_khz, int32_t protocol_code,
                               int32_t allow_erase_all, int32_t programmer_type_code);
+/* Selector: VID:PID[:SERIAL] or tcp://cmsis-dap@HOST[:PORT]. TCP defaults to port 4441. */
 uint64_t pr_session_open_with_probe(const char* selector, const char* chip, uint32_t speed_khz,
                                     int32_t protocol_code, int32_t allow_erase_all, int32_t programmer_type_code);
 int32_t pr_session_close(uint64_t session);

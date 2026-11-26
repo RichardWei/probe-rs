@@ -131,6 +131,17 @@ impl ProbeFactory for CmsisDapFactory {
         if let Some(selector) = selector
             && let Some(address) = tcp_address(selector)
         {
+            let transport = match selector {
+                DebugProbeSelector::Tcp(tcp) => crate::probe::ProbeTransport::Tcp(tcp.clone()),
+                DebugProbeSelector::Usb(_) => crate::probe::ProbeTransport::Usb(crate::probe::UsbProbeInfo {
+                    vendor_id: tcp::TCP_VID,
+                    product_id: tcp::TCP_PID,
+                    serial_number: Some(address.to_string()),
+                    is_hid_interface: false,
+                    interface: None,
+                    usb_location: None,
+                }),
+            };
             return vec![crate::probe::list::ProbeListItem::accessible(
                 crate::probe::DebugProbeInfo {
                     identifier: "CMSIS-DAP TCP".to_string(),
@@ -1322,6 +1333,28 @@ mod tcp_address_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tcp_selectors_resolve_to_cmsis_dap_metadata() {
+        use super::{CmsisDapFactory, DebugProbeSelector, ProbeFactory, tcp_address};
+
+        for (selector, address) in [
+            ("tcp://cmsis-dap@localhost", "localhost"),
+            ("tcp://cmsis-dap@[::1]:4441", "[::1]:4441"),
+            ("0000:0001:localhost:4441", "localhost:4441"),
+        ] {
+            let selector: DebugProbeSelector = selector.parse().unwrap();
+            assert_eq!(tcp_address(&selector), Some(address));
+            let probes = CmsisDapFactory.list_probes_filtered(Some(&selector));
+            assert_eq!(probes.len(), 1);
+            assert!(probes[0].info.is_probe_type::<CmsisDapFactory>());
+            assert_eq!(DebugProbeSelector::from(&probes[0].info), selector);
+        }
+
+        let unknown_driver = "tcp://unknown@localhost".parse().unwrap();
+        assert_eq!(tcp_address(&unknown_driver), None);
+        assert!("tcp://cmsis-dap@".parse::<DebugProbeSelector>().is_err());
+    }
+
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

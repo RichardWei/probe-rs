@@ -19,7 +19,7 @@ uint64_t pr_session_open_with_probe(const char *selector, const char *chip,
                                     int32_t allow_erase_all, int32_t programmer_type_code);
 ```
 
-`chip == NULL` 对应 `TargetSelector::Auto`；提供名称时由 probe-rs 查询内置目标数据库。`protocol_code` 为 `0`（默认）、`1`（SWD）、`2`（JTAG），`speed_khz == 0` 表示不指定速度。`programmer_type_code == 0` 不筛选探针，此时自动连接使用 probe-rs 的 `Session::auto_attach`；非零值仅筛选指定类型。`selector` 使用 probe-rs 的 `VID:PID[:SERIAL]` 格式。使用指定探针时调用 `Probe::attach`，不会改选其他设备。
+`chip == NULL` 对应 `TargetSelector::Auto`；提供名称时由 probe-rs 查询内置目标数据库。`protocol_code` 为 `0`（默认）、`1`（SWD）、`2`（JTAG），`speed_khz == 0` 表示不指定速度。`programmer_type_code == 0` 不筛选探针，此时自动连接使用 probe-rs 的 `Session::auto_attach`；非零值仅筛选指定类型。`selector` 支持 `VID:PID[:SERIAL]` 和 `tcp://cmsis-dap@HOST[:PORT]`。TCP 默认端口为 4441，带端口的 IPv6 地址使用方括号。TCP 端点通过 selector 显式指定，支持不筛选驱动或指定 CMSIS-DAP；旧式 `0000:0001:HOST[:PORT]` 仍可使用。使用指定探针时调用 `Probe::attach`，不会改选其他设备。
 
 `allow_erase_all` 在**创建 Session 时**设置 `Permissions::allow_erase_all()`。需要调用 `pr_session_erase_all` 或将烧录选项 `do_chip_erase` 置为真时，创建 Session 就应传入 `1`。旧的“关闭 Session → 擦除/烧录时重新连接”调用顺序已移除。
 
@@ -83,7 +83,7 @@ int main() {
 
 ## 其他查询语义
 
-`pr_probe_count`、`pr_probe_info`、`pr_probe_driver_flags` 只枚举静态探针信息；不会测试协议或更改速度。要验证某设备和目标能否连接，应按所需 selector、协议和速度打开 Session，再检查返回值。`pr_core_status` 分别报告 Rust `CoreStatus` 的 Running、Halted、LockedUp、Sleeping、Unknown，以及暂停原因和断点原因；semihosting 命令的 `Debug` 文本可由附加缓冲区读取。`pr_core_count` 和 `pr_registers_count` 通过输出参数返回数量，函数返回值区分零结果与错误。
+`pr_probe_count`、`pr_probe_info`、`pr_probe_driver_flags` 只枚举静态探针信息（不会扫描网络；TCP transport 的 VID/PID 为 0、序列号为空）；不会测试协议或更改速度。要验证某设备和目标能否连接，应按所需 selector、协议和速度打开 Session，再检查返回值。`pr_core_status` 分别报告 Rust `CoreStatus` 的 Running、Halted、LockedUp、Sleeping、Unknown，以及暂停原因和断点原因；semihosting 命令的 `Debug` 文本可由附加缓冲区读取。`pr_core_count` 和 `pr_registers_count` 通过输出参数返回数量，函数返回值区分零结果与错误。
 
 `pr_register_info` 同时返回寄存器宽度及 `RegisterDataType` 的整型或浮点类别。其余核心控制、内存、寄存器和断点接口继续直接对指定 Session/Core 调用 probe-rs；它们不会重新连接探针。芯片数据库与规格查询属于本库提供的展示接口，不等同于底层硬件探测。规格 JSON 中的 `cores`、`regions` 和 `flash_algorithms` 是数组；未提供默认格式时 `default_format` 为 `null`，不会被改成空字符串。
 
