@@ -581,39 +581,49 @@ pub extern "C" fn pr_probe_info(
         return -1;
     };
 
+    write_probe_info(
+        &info.identifier,
+        &info.transport,
+        identifier,
+        identifier_len,
+        vid,
+        pid,
+        serial,
+        serial_len,
+    );
+    0
+}
+
+fn write_probe_info(
+    name: &str,
+    transport: &probe_rs::probe::ProbeTransport,
+    identifier: *mut c_char,
+    identifier_len: usize,
+    vid: *mut u16,
+    pid: *mut u16,
+    serial: *mut c_char,
+    serial_len: usize,
+) {
+    use probe_rs::probe::ProbeTransport;
+
+    let (vendor_id, product_id, serial_number) = match transport {
+        ProbeTransport::Usb(usb) => (
+            usb.vendor_id,
+            usb.product_id,
+            usb.serial_number.as_deref().unwrap_or(""),
+        ),
+        ProbeTransport::Tcp(_) => (0, 0, ""),
+    };
     unsafe {
         if !vid.is_null() {
-            *vid = info.vendor_id;
+            *vid = vendor_id;
         }
         if !pid.is_null() {
-            *pid = info.product_id;
+            *pid = product_id;
         }
     }
-
-    let id = info.identifier.as_str();
-    let id_bytes = id.as_bytes();
-    let copy_id = id_bytes.len().saturating_add(1).min(identifier_len);
-    if !identifier.is_null() && copy_id > 0 {
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(identifier as *mut u8, copy_id);
-            let n = copy_id.saturating_sub(1);
-            slice[..n].copy_from_slice(&id_bytes[..n]);
-            slice[n] = 0;
-        }
-    }
-
-    let ser = info.serial_number.as_deref().unwrap_or("");
-    let ser_bytes = ser.as_bytes();
-    let copy_ser = ser_bytes.len().saturating_add(1).min(serial_len);
-    if !serial.is_null() && copy_ser > 0 {
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(serial as *mut u8, copy_ser);
-            let n = copy_ser.saturating_sub(1);
-            slice[..n].copy_from_slice(&ser_bytes[..n]);
-            slice[n] = 0;
-        }
-    }
-    0
+    write_c_string(name, identifier, identifier_len);
+    write_c_string(serial_number, serial, serial_len);
 }
 
 #[unsafe(no_mangle)]
@@ -1345,6 +1355,65 @@ pub extern "C" fn pr_clear_all_hw_breakpoints(session: u64) -> i32 {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn probe_info_writes_usb_and_tcp_fields() {
+        use probe_rs::probe::{ProbeTransport, TcpAddress, UsbProbeInfo};
+
+        let usb = ProbeTransport::Usb(UsbProbeInfo {
+            vendor_id: 0x1234,
+            product_id: 0x5678,
+            serial_number: Some("SN123".into()),
+            interface: None,
+            is_hid_interface: false,
+            usb_location: None,
+        });
+        let tcp = ProbeTransport::Tcp(TcpAddress {
+            driver: "cmsis-dap".into(),
+            address: "localhost:4441".into(),
+        });
+        let mut identifier = [0 as c_char; 4];
+        let mut serial = [0 as c_char; 8];
+        let (mut vid, mut pid) = (0, 0);
+        for (transport, expected_vid, expected_pid, expected_serial) in
+            [(&usb, 0x1234, 0x5678, &b"SN123"[..]), (&tcp, 0, 0, &b""[..])]
+        {
+            write_probe_info(
+                "probe",
+                transport,
+                identifier.as_mut_ptr(),
+                identifier.len(),
+                &mut vid,
+                &mut pid,
+                serial.as_mut_ptr(),
+                serial.len(),
+            );
+            assert_eq!((vid, pid), (expected_vid, expected_pid));
+            assert_eq!(unsafe { std::ffi::CStr::from_ptr(identifier.as_ptr()) }.to_bytes(), b"pro");
+            assert_eq!(unsafe { std::ffi::CStr::from_ptr(serial.as_ptr()) }.to_bytes(), expected_serial);
+        }
+    }
+
+    #[test]
+    fn tcp_session_rejects_mismatched_programmer_type() {
+        let selector = c"tcp://cmsis-dap@localhost:4441";
+        let session = pr_session_open_with_probe(
+            selector.as_ptr(),
+            std::ptr::null(),
+            0,
+            0,
+            0,
+            type_to_code(ProgrammerType::StLink),
+        );
+        assert_eq!(session, 0);
+
+        let mut error = [0 as c_char; 128];
+        pr_last_error(error.as_mut_ptr(), error.len());
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(error.as_ptr()) }.to_bytes(),
+            b"probe not found or programmer type mismatch"
+        );
+    }
 
     #[test]
     fn version_roundtrip() {

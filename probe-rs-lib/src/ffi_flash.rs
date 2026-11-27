@@ -219,7 +219,7 @@ pub extern "C" fn pr_session_flash(session: u64, path: *const c_char, image: *co
     let session = match get_session(session) { Ok(v) => v, Err(e) => { set_error(e); return -1; } };
     options.progress = make_progress(callback, context);
     let mut session = session.lock().unwrap();
-    match flashing::download_file_with_options(&mut session, path, image, options) {
+    match flashing::download_file_with_options(&mut session, registry(), path, image, options) {
         Ok(()) => 0,
         Err(e) => { set_error(error_chain(&e)); -1 }
     }

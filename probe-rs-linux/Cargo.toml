@@ -10,14 +10,11 @@ readme.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 probe-rs.workspace = true
-
 bitfield = "0.20"
 docsplay.workspace = true
 thiserror.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
 gpiocdev = "0.8"
 spidev = "0.7"
 

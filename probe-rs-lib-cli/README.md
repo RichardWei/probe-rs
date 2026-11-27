@@ -1,12 +1,15 @@
 # probe-rs-lib-cli
 
-本 CLI 动态加载同版本 `probe-rs-lib`，用 C ABI 验证 C/C++ 调用路径。默认从可执行文件所在目录加载动态库；也可用 `--dll PATH` 指定。所有硬件操作先创建 Session，操作结束后关闭。`flash`、`erase-all`、`detect`、`check`、`read16`、`write16` 的 `--probe VID:PID[:SERIAL]` 都会用于实际连接；未指定则由 probe-rs 自动选探针。`--programmer-type TYPE` 是可选筛选条件，作用于本次 Session 创建，不保存进程级选择状态。
+`SELECTOR` 支持 `VID:PID[:SERIAL]` 和 `tcp://cmsis-dap@HOST[:PORT]`。TCP 默认端口为 4441，带端口的 IPv6 地址使用方括号。`list` 不扫描网络，连接时需显式提供 TCP selector。
+
+本 CLI 动态加载同版本 `probe-rs-lib`，用 C ABI 验证 C/C++ 调用路径。默认从可执行文件所在目录加载动态库；也可用 `--dll PATH` 指定。所有硬件操作先创建 Session，操作结束后关闭。`flash`、`erase-all`、`detect`、`check`、`read16`、`write16` 的 `--probe SELECTOR` 都会用于实际连接；未指定则由 probe-rs 自动选探针。`--programmer-type TYPE` 是可选筛选条件，作用于本次 Session 创建，不保存进程级选择状态。
 
 ## 常用命令
 
 ```text
 probe-rs-lib-cli --op list
 probe-rs-lib-cli --op detect --probe 0483:374b --protocol swd --speed 2000
+probe-rs-lib-cli --op detect --probe tcp://cmsis-dap@192.168.1.50:4441 --programmer-type cmsis-dap
 probe-rs-lib-cli --op check --chip STM32H750VBTx --probe 0483:374b
 probe-rs-lib-cli --op erase-all --chip STM32H750VBTx --probe 0483:374b
 probe-rs-lib-cli --op flash --chip STM32H750VBTx --probe 0483:374b --file firmware.hex

@@ -3,7 +3,7 @@ version = "0.32.0"
 edition = "2024"
 
 documentation = "https://docs.rs/probe-rs/"
-homepage = "https://github.com/probe-rs/probe-rs"
+homepage = "https://probe.rs"
 repository = "https://github.com/probe-rs/probe-rs"
 readme = "README.md"
 license = "MIT OR Apache-2.0"

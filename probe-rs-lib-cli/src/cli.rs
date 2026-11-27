@@ -193,7 +193,8 @@ impl Args {
                 "--skip-section" => args.skip_sections.push(value()?),
                 "--help" => {
                     println!("Operations: --op list|detect|check|flash|erase-all|read16|write16|chips|spec\n\
-                        Connection: --chip NAME --probe VID:PID[:SERIAL] --protocol auto|swd|jtag --speed KHZ --programmer-type TYPE\n\
+                        Probe selectors: VID:PID[:SERIAL] or tcp://cmsis-dap@HOST[:PORT] (default port 4441)\n\
+                        Connection: --chip NAME --probe SELECTOR --protocol auto|swd|jtag --speed KHZ --programmer-type TYPE\n\
                         Image: --file PATH --format elf|hex|bin --base ADDRESS --skip BYTES --skip-section NAME\n\
                         Flash options: --verify --preverify --chip-erase --keep-unwritten-bytes --dry-run --skip-erase\n\
                         --disable-double-buffering --preferred-algo NAME --ram-chunk-size BYTES\n\
@@ -353,6 +354,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tcp_probe_selector_is_preserved() {
+        let selector = "tcp://cmsis-dap@[::1]:4441";
+        let args = Args::parse(
+            ["--op", "detect", "--probe", selector, "--programmer-type", "cmsis-dap"]
+                .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(args.probe.as_deref(), Some(selector));
+        assert_eq!(args.programmer_type.as_deref(), Some("cmsis-dap"));
+    }
+
     #[test]
     fn defaults_match_probe_rs() {
         let args = Args::parse(Vec::<String>::new()).unwrap();
